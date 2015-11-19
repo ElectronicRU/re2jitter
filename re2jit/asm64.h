@@ -306,10 +306,10 @@ namespace as
         //       mov    %eax, %ecx  ->       0x89 [0xc1] (= 0b11 000 001)
         //       cmovbe %eax, %ecx  ->  0x0f 0x46 [0xc8] (= 0b11 001 000)
         // This is because mov is either r -> r/m or m -> r while cmovcc is r/m -> r.
-        code& mov(r32 a, r32 b, cnd c) { return rex(0, a, b).imm8(0x0f).imm8(0x40 | c).modrm(b, a); }
-        code& mov(r64 a, r64 b, cnd c) { return rex(1, a, b).imm8(0x0f).imm8(0x40 | c).modrm(b, a); }
-        code& mov(mem a, r32 b, cnd c) { return rex(0, a, b).imm8(0x0f).imm8(0x40 | c).modrm(b, a); }
-        code& mov(mem a, r64 b, cnd c) { return rex(1, a, b).imm8(0x0f).imm8(0x40 | c).modrm(b, a); }
+        code& mov(r32 a, r32 b, cnd c) { return rex(0, b, a).imm8(0x0f).imm8(0x40 | c).modrm(b, a); }
+        code& mov(r64 a, r64 b, cnd c) { return rex(1, b, a).imm8(0x0f).imm8(0x40 | c).modrm(b, a); }
+        code& mov(mem a, r32 b, cnd c) { return rex(0, b, a).imm8(0x0f).imm8(0x40 | c).modrm(b, a); }
+        code& mov(mem a, r64 b, cnd c) { return rex(1, b, a).imm8(0x0f).imm8(0x40 | c).modrm(b, a); }
 
         // shorthands for indirect jumps to 64-bit (ok, 48-bit) pointers.
         template <typename T> code& mov   (T* p, r64 b) { return mov(i64(p), b); }
