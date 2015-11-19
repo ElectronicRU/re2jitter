@@ -316,70 +316,6 @@ namespace as
         template <typename T> code& jmp   (T* p) { return mov(p, r10).jmp  (r10); }
         template <typename T> code& call  (T* p) { return mov(p, r10).call (r10); }
 
-        template <typename any>
-            code& rex(i8 w,        any b) { return rex(w, r0, b); }
-        code& rex(i8 w, reg r, ptr b) { return rex(w, r.H(), b.a.reg.H(), b.b.reg.H()); }
-        code& rex(i8 w, ptr r, reg b) { return rex(w, b.H(), r.a.reg.H(), r.b.reg.H()); }
-        code& rex(i8 w, reg r, reg b) { return rex(w, r.H(),       b.H(),           0); }
-        code& rex(i8 w,  i8 r,  i8 b, i8 x)
-        {
-            //     /--- opcode is 64-bit
-            //     |   /--- additional significant bit for modr/m reg2 field
-            //     |   |   /-- same for index register
-            //     |   |   |   /--- same for reg1 (see below)
-            return w + r + x + b ? imm8(0x40 | w << 3 | r << 2 | x << 1 | b) : *this;
-        }
-
-        template <typename any>
-            code& modrm(reg a, any b) { return modrm(a.L(), b); }
-        code& modrm(ptr a, reg b) { return modrm(b.L(), a); }
-        code& modrm( i8 a, reg r) { return imm8(0xc0 | a << 3 | r.L()); }
-        code& modrm( i8 a, ptr m) {
-            size_t ref = _code.size();
-            // _code[ref] is the ModR/M byte:
-            //    0 1 2 3 4 5 6 7
-            //    | | |   | \---/----- register 1
-            //    | | \---/----- opcode extension (only for single-register opcodes) or register 2
-            //    \-/----- mode (0, 1, or 2; 3 means "raw value from register" and is encoded above)
-            imm8(a << 3 | m.a.reg.L());
-
-            if (m.a.reg == rip)
-                // mode = 0 with reg1 = rbp/rip/r13 (0b101) means `disp32(%rip)`
-                // it's not possible to use rip-relative addressing in any other way.
-                return imm32((i32) m.a.add);
-
-            if (m.a.reg == r0 || m.a.reg.L() == rsp.L() || m.b.reg != r0) {
-                // rsp's encoding (100) in reg1 means "use SIB byte".
-                _code[ref] = (_code[ref] & ~7) | r0.L();
-                // SIB byte:
-                //    0 1 2 3 4 5 6 7
-                //    | | |   | \---/--- base register
-                //    | | \---/--- index register; %rsp if none
-                //    \-/--- index scale: result = base + index * (2 ** scale) + disp
-                i8 scale = m.b.mul == 2 ? 1
-                    : m.b.mul == 4 ? 2
-                    : m.b.mul == 8 ? 3 : 0;
-                i8 sib = m.b.reg.L() << 3 | scale << 6;
-
-                if (m.a.reg == r0)
-                    // %rbp as base in mode 0 means no base at all, only 32-bit absolute address
-                    return imm8(sib | rbp.L()).imm32((i32) m.a.add);
-
-                imm8(sib | m.a.reg.L());
-            }
-
-            if (m.a.add == 0 && m.a.reg != rbp && m.a.reg != r13)
-                // mode = 0 means `(reg1)`, i.e. no displacement unless base is rbp/r13.
-                return *this;
-
-            if (-128 <= m.a.add && m.a.add < 128) {
-                _code[ref] |= 0x40;  // mode = 1 -- 8-bit displacement.
-                return imm8((i8) m.a.add);
-            }
-
-            _code[ref] |= 0x80;  // mode = 2 -- 32-bit displacement
-            return imm32((i32) m.a.add);
-        }
         protected:
             std::vector<i8> _code;
             std::deque<target> _targets;
@@ -394,6 +330,72 @@ namespace as
                 if (i.tg != NULL) return i.tg;
                 _targets.emplace_back();
                 return i.tg = &_targets.back();
+            }
+
+        public:
+            template <typename any>
+                code& rex(i8 w,        any b) { return rex(w, r0, b); }
+            code& rex(i8 w, reg r, ptr b) { return rex(w, r.H(), b.a.reg.H(), b.b.reg.H()); }
+            code& rex(i8 w, ptr r, reg b) { return rex(w, b.H(), r.a.reg.H(), r.b.reg.H()); }
+            code& rex(i8 w, reg r, reg b) { return rex(w, r.H(),       b.H(),           0); }
+            code& rex(i8 w,  i8 r,  i8 b, i8 x)
+            {
+                //     /--- opcode is 64-bit
+                //     |   /--- additional significant bit for modr/m reg2 field
+                //     |   |   /-- same for index register
+                //     |   |   |   /--- same for reg1 (see below)
+                return w + r + x + b ? imm8(0x40 | w << 3 | r << 2 | x << 1 | b) : *this;
+            }
+
+            template <typename any>
+                code& modrm(reg a, any b) { return modrm(a.L(), b); }
+            code& modrm(ptr a, reg b) { return modrm(b.L(), a); }
+            code& modrm( i8 a, reg r) { return imm8(0xc0 | a << 3 | r.L()); }
+            code& modrm( i8 a, ptr m) {
+                size_t ref = _code.size();
+                // _code[ref] is the ModR/M byte:
+                //    0 1 2 3 4 5 6 7
+                //    | | |   | \---/----- register 1
+                //    | | \---/----- opcode extension (only for single-register opcodes) or register 2
+                //    \-/----- mode (0, 1, or 2; 3 means "raw value from register" and is encoded above)
+                imm8(a << 3 | m.a.reg.L());
+
+                if (m.a.reg == rip)
+                    // mode = 0 with reg1 = rbp/rip/r13 (0b101) means `disp32(%rip)`
+                    // it's not possible to use rip-relative addressing in any other way.
+                    return imm32((i32) m.a.add);
+
+                if (m.a.reg == r0 || m.a.reg.L() == rsp.L() || m.b.reg != r0) {
+                    // rsp's encoding (100) in reg1 means "use SIB byte".
+                    _code[ref] = (_code[ref] & ~7) | r0.L();
+                    // SIB byte:
+                    //    0 1 2 3 4 5 6 7
+                    //    | | |   | \---/--- base register
+                    //    | | \---/--- index register; %rsp if none
+                    //    \-/--- index scale: result = base + index * (2 ** scale) + disp
+                    i8 scale = m.b.mul == 2 ? 1
+                        : m.b.mul == 4 ? 2
+                        : m.b.mul == 8 ? 3 : 0;
+                    i8 sib = m.b.reg.L() << 3 | scale << 6;
+
+                    if (m.a.reg == r0)
+                        // %rbp as base in mode 0 means no base at all, only 32-bit absolute address
+                        return imm8(sib | rbp.L()).imm32((i32) m.a.add);
+
+                    imm8(sib | m.a.reg.L());
+                }
+
+                if (m.a.add == 0 && m.a.reg != rbp && m.a.reg != r13)
+                    // mode = 0 means `(reg1)`, i.e. no displacement unless base is rbp/r13.
+                    return *this;
+
+                if (-128 <= m.a.add && m.a.add < 128) {
+                    _code[ref] |= 0x40;  // mode = 1 -- 8-bit displacement.
+                    return imm8((i8) m.a.add);
+                }
+
+                _code[ref] |= 0x80;  // mode = 2 -- 32-bit displacement
+                return imm32((i32) m.a.add);
             }
     };
 };
