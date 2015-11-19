@@ -54,13 +54,14 @@ struct native
             int state0,
             as::label &start_match) {
         as::label clast, cend;
-        code.mark(clast)
-            .cmp(SEND, SCURRENT).jmp(REGEX_FINISH, as::equal);  // if the end of the string, end it
+        code.mark(clast);
         // if we have a match, no point searching for a new one
         code.test(RE2JIT_ANCHOR_START, FLAGS).jmp(cend, as::not_zero);
         code.test(SMATCH, SMATCH).jmp(cend, as::not_zero);
         code.mark(start_match);
         enqueue_for_state(code, state0);
+        // now that we've found all possible and impossible matches, we can bail out
+        code.cmp(SEND, SCURRENT).jmp(REGEX_FINISH, as::equal);  // if the end of the string, end it
         code.mark(cend)
             // if the list is empty, move out
             .cmp(CLIST, NLIST).jmp(REGEX_FINISH, as::equal)
@@ -157,7 +158,7 @@ struct native
         // this code could theoretically be more optimized by nearly doubling its size,
         // but currently I find it hard to give half a shit about it.
         as::label start_match;
-        code.cmp(SCURRENT, SEND).jmp(REGEX_FINISH, as::equal).jmp8(start_match);
+        code.jmp8(start_match);
         emit_laststate(code, prog_->start(), start_match);
 
         for (int i = 0; i < prog->size(); ++i) {
@@ -265,6 +266,12 @@ void native::enqueue_for_state(as::code &code, int statenum) {
         case re2::kInstAltMatch:  // treat them the same for now
         case re2::kInstAlt:
             state_stack_[nstk++].id = ip->out1();
+            state_stack_[nstk++].id = ip->out();
+            break;
+
+        case re2::kInstCapture:
+            // ignore, lol
+        case re2::kInstNop:
             state_stack_[nstk++].id = ip->out();
             break;
 
