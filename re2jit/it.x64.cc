@@ -5,7 +5,7 @@
 
 namespace re2jit {
 static constexpr const as::r64 CLIST = as::rsi, NLIST = as::rdi, LISTSKIP = as::r14,
-                 SBEGIN = as::r8, SEND = as::r9, SCURRENT = as::r10, SMATCH = as::r11,
+                 SEND = as::r8, SCURRENT = as::r9, SMATCH = as::r10,
                  LISTBEGIN = as::r12, LISTEND = as::r13, VIS = as::rbp;
 static constexpr const as::rb CHAR = as::bl;
 static constexpr const as::r32 FLAGS = as::edx;
@@ -54,8 +54,8 @@ struct native
         code.mark(start_match);
         enqueue_for_state(code, state0);
         // now that we've found all possible and impossible matches, we can bail out
-        code.cmp(SEND, SCURRENT).jmp(REGEX_FINISH, as::equal);  // if the end of the string, end it
         code.mark(cend)
+            .cmp(SEND, SCURRENT).jmp(REGEX_FINISH, as::equal)  // if the end of the string, end it
             // if the list is empty, move out
             .cmp(CLIST, NLIST).jmp(REGEX_FINISH, as::equal)
             .mov(NLIST, LISTSKIP);
@@ -129,23 +129,21 @@ struct native
         // Prologue. It's just handcrafted mostly.
         code.mark(REGEX_BEGIN)
             .push(as::r64(CHAR.id))
-            .push(SMATCH)
             .push(LISTBEGIN)
             .push(LISTEND)
             .push(LISTSKIP)
             .push(VIS);
 
         code.mov(as::rcx, LISTBEGIN)
-            .mov(as::ptr(as::rcx + 2 * 4 * (number_of_states_+ 1)), LISTEND)
+            .mov(as::ptr(as::rcx + 2 * 8 * (number_of_states_+ 1)), LISTEND)
 
             .mov(as::r8, VIS)
 
-            .mov(as::rdi, SBEGIN)
             .mov(as::rdi, SCURRENT)
-            .mov(as::ptr(as::rdi + as::rsi), SEND)
+            .mov(as::rsi, SEND)
             .xor_(SMATCH, SMATCH)
 
-            .mov(LISTBEGIN + 4, CLIST)
+            .mov(LISTBEGIN + 8, CLIST)
             .mov(CLIST, NLIST);
 
         // this code could theoretically be more optimized by nearly doubling its size,
@@ -172,7 +170,6 @@ struct native
             .pop(LISTSKIP)
             .pop(LISTEND)
             .pop(LISTBEGIN)
-            .pop(SMATCH)
             .pop(as::r64(CHAR.id))
             .ret();
 
@@ -209,12 +206,12 @@ struct native
     bool match(const re2::StringPiece &text, int flags,
             re2::StringPiece *groups, int ngroups)
     {
-        typedef char *f(const char*, size_t, int, void *, void *);
+        typedef char *f(const char*, const char*, int, void *, void *);
         as::i64 *list = new as::i64[(number_of_states_ + 1) * 2];
         as::i8 *visited = new as::i8[(number_of_states_ + 7) / 8];
         if (flags & RE2JIT_ANCHOR_END)
             flags |= RE2JIT_MATCH_RIGHTMOST;
-        char *result = ((f *) code_)(text.data(), text.size(), flags, list, visited);
+        char *result = ((f *) code_)(text.data(), text.data() + text.size(), flags, list, visited);
         delete[] list;
         delete[] visited;
         if (result) {
