@@ -16,6 +16,11 @@ namespace re2jit
         RE2JIT_ANCHOR_END   = 2,
     };
 
+    enum RE2JIT_UTILITY_FLAGS
+    {
+        RE2JIT_MATCH_RIGHTMOST = 4,
+    };
+
     struct it
     {
         it(const re2::StringPiece&, int max_mem = 8 << 21);

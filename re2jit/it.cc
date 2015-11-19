@@ -6,9 +6,9 @@
 #include "it.h"
 
 
-#if RE2JIT_VM
-    #pragma message "target = NFA interpreter"
-    #include "it.vm.cc"
+#if RE2JIT_LIBJIT
+    #pragma message "target = LibJIT"
+    #include "it.libjit.cc"
 #elif __x86_64__
     #pragma message "target = x86_64 System V ABI"
     #include "it.x64.cc"
@@ -49,7 +49,7 @@ namespace re2jit
         if (_forward->anchor_end() || anchor == RE2::ANCHOR_BOTH)
             flags |= RE2JIT_ANCHOR_END;
 
-        if (!(flags & RE2JIT_ANCHOR_START)) {
+        if (false && !(flags & RE2JIT_ANCHOR_START)) {
             re2::StringPiece found;
             bool failed  = false;
             bool matched = _forward->SearchDFA(text, text, re2::Prog::kUnanchored,

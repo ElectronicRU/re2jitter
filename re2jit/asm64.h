@@ -3,9 +3,10 @@
 
 #include <deque>
 #include <vector>
-#include <string.h>
-#include <stddef.h>
-#include <stdint.h>
+#include <cstring>
+#include <cstddef>
+#include <cstdint>
+#include <cassert>
 
 
 namespace as
@@ -13,12 +14,13 @@ namespace as
     typedef uint8_t  i8;
     typedef uint32_t i32;
     typedef uint64_t i64;
+    typedef  int8_t  s8;
     typedef  int32_t s32;
 
     enum condition : i8
     {
-        _0, _1, less_u, more_equal_u, equal,        not_equal,            less_equal_u, more_u, _8, _9,
-        _a, _b, less,   more_equal,   zero = equal, not_zero = not_equal, less_equal,   more
+        overflow, not_overflow, below, not_below, equal, not_equal, not_above, above, sign, not_sign,
+        parity_even, parity_odd, less,   more_equal,   zero = equal, not_zero = not_equal, less_equal,   more
     };
 
     struct reg
@@ -80,8 +82,9 @@ namespace as
     // pointer arithmetic magic--
 
     struct target { size_t offset = -1;
-                    std::vector<size_t> abs64;
+                    std::vector<size_t> rel8;
                     std::vector<size_t> rel32;
+                    std::vector<size_t> off32;
                     void *deref(void *base) const { return (i8 *) base + offset; } };
 
     // linker needs to keep track of all existing targets, so outside code can only
@@ -109,14 +112,20 @@ namespace as
                 if (tg.offset == (size_t) -1)
                     return false;
 
-                i64 abs = (i64) (out + tg.offset);
                 s32 rel;
-
-                for (size_t ref : tg.abs64)
-                    memcpy(&out[ref], &abs, 8);
+                i64 off = tg.offset;
 
                 for (size_t ref : tg.rel32)
                     memcpy(&out[ref], &(rel = tg.offset - ref - 4), 4);
+
+                for (size_t ref : tg.off32)
+                    memcpy(&out[ref], &off, 4);
+
+                for (size_t ref : tg.rel8) {
+                    rel = tg.offset - ref - 1;
+                    assert((-128 <= rel) && (rel <= 127));
+                    out[ref] = (i8)((s8)rel);
+                }
             }
 
             return true;
@@ -130,11 +139,14 @@ namespace as
 
         code& mark  (lab i) { init_label(i)->offset = size(); return *this; }
         code& rel32 (lab i) { init_label(i)->rel32.push_back(size()); return imm32(0); }
-        code& abs64 (lab i) { init_label(i)->abs64.push_back(size()); return imm64(0); }
+        code& rel8  (lab i) { init_label(i)->rel8 .push_back(size()); return imm8 (0); }
+        code& off32 (lab i) { init_label(i)->off32.push_back(size()); return imm32(0); }
 
         //           src    dst             REX prefix   opcode     ModR/M      immediate
         //                  /cond           [64-bit mode]           [+ disp]
-        code& add   ( i8 a,  rb b) { return rex(0,    b).imm8(0x80).modrm(0, b).imm8 (a) ; }
+        code& add   ( i8 a,  rb b) { return (b != al) ?
+                                            rex(0,    b).imm8(0x80).modrm(0, b).imm8 (a) :
+                                                         imm8(0x04).            imm8 (a) ; }
         code& add   ( i8 a, r32 b) { return rex(0,    b).imm8(0x83).modrm(0, b).imm8 (a) ; }
         code& add   (i32 a, r32 b) { return rex(0,    b).imm8(0x81).modrm(0, b).imm32(a) ; }
         code& add   ( i8 a, r64 b) { return rex(1,    b).imm8(0x83).modrm(0, b).imm8 (a) ; }
@@ -157,9 +169,13 @@ namespace as
         code& call  (i32 a       ) { return              imm8(0xe8).            imm32(a) ; }
         code& call  (lab a       ) { return              imm8(0xe8).            rel32(a) ; }
         code& call  (       r64 b) { return rex(0,    b).imm8(0xff).modrm(2, b)          ; }
-        code& cmp   ( i8 a,  rb b) { return rex(0,    b).imm8(0x80).modrm(7, b).imm8 (a) ; }
+        code& cmp   ( i8 a,  rb b) { return (b != al) ?
+                                            rex(0,    b).imm8(0x80).modrm(7, b).imm8 (a) :
+                                                         imm8(0x3c).            imm8 (a) ; }
         code& cmp   ( i8 a, r32 b) { return rex(0,    b).imm8(0x83).modrm(7, b).imm8 (a) ; }
-        code& cmp   (i32 a, r32 b) { return rex(0,    b).imm8(0x81).modrm(7, b).imm32(a) ; }
+        code& cmp   (i32 a, r32 b) { return (b != eax) ?
+                                            rex(0,    b).imm8(0x81).modrm(7, b).imm32(a) :
+                                                         imm8(0x3d).            imm32(a) ; }
         code& cmp   (r32 a, r32 b) { return rex(0, a, b).imm8(0x39).modrm(a, b)          ; }
         code& cmp   (r64 a, r64 b) { return rex(1, a, b).imm8(0x39).modrm(a, b)          ; }
         code& cmp   ( i8 a, mem b) { return rex(0,    b).imm8(0x80).modrm(7, b).imm8 (a) ; }
@@ -178,11 +194,14 @@ namespace as
         code& jmp   (lab a       ) { return              imm8(0xe9).            rel32(a) ; }
         code& jmp   (i32 a, cnd b) { return   imm8(0x0f).imm8(0x80 | b).        imm32(a) ; }
         code& jmp   (lab a, cnd b) { return   imm8(0x0f).imm8(0x80 | b).        rel32(a) ; }
+        code& jmp8  (lab a       ) { return              imm8(0xeb).            rel8 (a) ; }
+        code& jmp8  (lab a, cnd b) { return              imm8(0x70 | b).        rel8 (a) ; }
         code& jmp   (       r64 b) { return rex(0,    b).imm8(0xff).modrm(4, b)          ; }
+        code& mov   (rb  a, rb  b) { return rex(0, a, b).imm8(0x88).modrm(a, b)          ; }
+        code& mov   (i8  a, rb  b) { return rex(0,    b).imm8(0xb0 | b.L()).    imm8 (a) ; }
         code& mov   (i32 a, r32 b) { return rex(0,    b).imm8(0xb8 | b.L()).    imm32(a) ; }
         code& mov   (i32 a, r64 b) { return rex(1,    b).imm8(0xc7).modrm(0, b).imm32(a) ; }
         code& mov   (i64 a, r64 b) { return rex(1,    b).imm8(0xb8 | b.L()).    imm64(a) ; }
-        code& mov   (lab a, r64 b) { return rex(1,    b).imm8(0xb8 | b.L()).    abs64(a) ; }
         code& mov   (r32 a, r32 b) { return rex(0, a, b).imm8(0x89).modrm(a, b)          ; }
         code& mov   (r64 a, r64 b) { return rex(1, a, b).imm8(0x89).modrm(a, b)          ; }
         code& mov   (i32 a, mem b) { return rex(1,    b).imm8(0xc7).modrm(0, b).imm32(a) ; }
@@ -191,6 +210,9 @@ namespace as
         // NOTE: MOV ptr, reg is actually LEA mem, reg
         code& mov   (ptr a, r32 b) { return rex(0, a, b).imm8(0x8d).modrm(a, b)          ; }
         code& mov   (ptr a, r64 b) { return rex(1, a, b).imm8(0x8d).modrm(a, b)          ; }
+        code& mov   (lab l, r64 b) {        rex(1,    b).imm8(0x8d).modrm(ptr(rip), b)   ;
+                                     return init_label(l)->rel32.push_back(size()-4), *this; }
+                                     
         code& mov   (mem a,  rb b) { return rex(0, a, b).imm8(0x8a).modrm(a, b)          ; }
         code& mov   (mem a, r32 b) { return rex(0, a, b).imm8(0x8b).modrm(a, b)          ; }
         code& mov   (mem a, r64 b) { return rex(1, a, b).imm8(0x8b).modrm(a, b)          ; }
@@ -221,7 +243,9 @@ namespace as
         code& shl   ( i8 a, r64 b) { return rex(1,    b).imm8(0xc1).modrm(4, b).imm8 (a) ; }
         code& shr   ( i8 a, r32 b) { return rex(0,    b).imm8(0xc1).modrm(5, b).imm8 (a) ; }
         code& shr   ( i8 a, r64 b) { return rex(1,    b).imm8(0xc1).modrm(5, b).imm8 (a) ; }
-        code& sub   ( i8 a,  rb b) { return rex(0,    b).imm8(0x80).modrm(5, b).imm8 (a) ; }
+        code& sub   ( i8 a,  rb b) { return (b != al) ?
+                                            rex(0,    b).imm8(0x80).modrm(5, b).imm8 (a) :
+                                                         imm8(0x2c).            imm8 (a) ; }
         code& sub   ( i8 a, r32 b) { return rex(0,    b).imm8(0x83).modrm(5, b).imm8 (a) ; }
         code& sub   (i32 a, r32 b) { return rex(0,    b).imm8(0x81).modrm(5, b).imm32(a) ; }
         code& sub   ( i8 a, r64 b) { return rex(1,    b).imm8(0x83).modrm(5, b).imm8 (a) ; }
@@ -234,6 +258,7 @@ namespace as
         code& sub   (r64 a, mem b) { return rex(1, a, b).imm8(0x29).modrm(a, b)          ; }
         code& sub   (mem a, r32 b) { return rex(0, a, b).imm8(0x2b).modrm(a, b)          ; }
         code& sub   (mem a, r64 b) { return rex(1, a, b).imm8(0x2b).modrm(a, b)          ; }
+        code& test  (i8  a, rb  b) { return rex(0,    b).imm8(0xf6).modrm(0, b).imm8 (a) ; }
         code& test  (i32 a, r32 b) { return rex(0,    b).imm8(0xf7).modrm(0, b).imm32(a) ; }
         code& test  (i32 a, r64 b) { return rex(1,    b).imm8(0xf7).modrm(0, b).imm32(a) ; }
         code& test  (r32 a, r32 b) { return rex(0, a, b).imm8(0x85).modrm(a, b)          ; }
@@ -250,6 +275,33 @@ namespace as
         code& xor_  (r32 a, r32 b) { return rex(0, a, b).imm8(0x31).modrm(a, b)          ; }
         code& xor_  (r64 a, r64 b) { return rex(1, a, b).imm8(0x31).modrm(a, b)          ; }
 
+        code& xchg  (rb  a, rb  b) { return rex(0, a, b).imm8(0x86).modrm(a, b)          ; }
+        code& xchg  (r32 a, r32 b)
+        { if (a == eax)
+                                   { return rex(0,    b).imm8(0x90 | b.L())              ; }
+          else
+                                   { return rex(0, a, b).imm8(0x87).modrm(a, b)          ; }
+        }
+
+        code& xchg  (r64 a, r64 b)
+        { if (a == eax)
+                                   { return rex(1,    b).imm8(0x90 | b.L())              ; }
+          else
+                                   { return rex(1, a, b).imm8(0x87).modrm(a, b)          ; }
+        }
+
+        code& movsb () { return            imm8(0xa4); }
+        code& movsd () { return            imm8(0xa5); }
+        code& movsq () { return rex(1, r0).imm8(0xa5); }
+
+        code& stosb () { return            imm8(0xaa); }
+        code& stosl () { return            imm8(0xab); }
+        code& stosq () { return rex(1, r0).imm8(0xab); }
+
+        code& lodsb () { return            imm8(0xac); }
+        code& lodsl () { return            imm8(0xad); }
+        code& lodsq () { return rex(1, r0).imm8(0xad); }
+
         // NOTE: CMOVcc: ModR/M reg1/reg2 fields are swapped compared to normal MOV.
         //       mov    %eax, %ecx  ->       0x89 [0xc1] (= 0b11 000 001)
         //       cmovbe %eax, %ecx  ->  0x0f 0x46 [0xc8] (= 0b11 001 000)
@@ -264,6 +316,70 @@ namespace as
         template <typename T> code& jmp   (T* p) { return mov(p, r10).jmp  (r10); }
         template <typename T> code& call  (T* p) { return mov(p, r10).call (r10); }
 
+        template <typename any>
+            code& rex(i8 w,        any b) { return rex(w, r0, b); }
+        code& rex(i8 w, reg r, ptr b) { return rex(w, r.H(), b.a.reg.H(), b.b.reg.H()); }
+        code& rex(i8 w, ptr r, reg b) { return rex(w, b.H(), r.a.reg.H(), r.b.reg.H()); }
+        code& rex(i8 w, reg r, reg b) { return rex(w, r.H(),       b.H(),           0); }
+        code& rex(i8 w,  i8 r,  i8 b, i8 x)
+        {
+            //     /--- opcode is 64-bit
+            //     |   /--- additional significant bit for modr/m reg2 field
+            //     |   |   /-- same for index register
+            //     |   |   |   /--- same for reg1 (see below)
+            return w + r + x + b ? imm8(0x40 | w << 3 | r << 2 | x << 1 | b) : *this;
+        }
+
+        template <typename any>
+            code& modrm(reg a, any b) { return modrm(a.L(), b); }
+        code& modrm(ptr a, reg b) { return modrm(b.L(), a); }
+        code& modrm( i8 a, reg r) { return imm8(0xc0 | a << 3 | r.L()); }
+        code& modrm( i8 a, ptr m) {
+            size_t ref = _code.size();
+            // _code[ref] is the ModR/M byte:
+            //    0 1 2 3 4 5 6 7
+            //    | | |   | \---/----- register 1
+            //    | | \---/----- opcode extension (only for single-register opcodes) or register 2
+            //    \-/----- mode (0, 1, or 2; 3 means "raw value from register" and is encoded above)
+            imm8(a << 3 | m.a.reg.L());
+
+            if (m.a.reg == rip)
+                // mode = 0 with reg1 = rbp/rip/r13 (0b101) means `disp32(%rip)`
+                // it's not possible to use rip-relative addressing in any other way.
+                return imm32((i32) m.a.add);
+
+            if (m.a.reg == r0 || m.a.reg.L() == rsp.L() || m.b.reg != r0) {
+                // rsp's encoding (100) in reg1 means "use SIB byte".
+                _code[ref] = (_code[ref] & ~7) | r0.L();
+                // SIB byte:
+                //    0 1 2 3 4 5 6 7
+                //    | | |   | \---/--- base register
+                //    | | \---/--- index register; %rsp if none
+                //    \-/--- index scale: result = base + index * (2 ** scale) + disp
+                i8 scale = m.b.mul == 2 ? 1
+                    : m.b.mul == 4 ? 2
+                    : m.b.mul == 8 ? 3 : 0;
+                i8 sib = m.b.reg.L() << 3 | scale << 6;
+
+                if (m.a.reg == r0)
+                    // %rbp as base in mode 0 means no base at all, only 32-bit absolute address
+                    return imm8(sib | rbp.L()).imm32((i32) m.a.add);
+
+                imm8(sib | m.a.reg.L());
+            }
+
+            if (m.a.add == 0 && m.a.reg != rbp && m.a.reg != r13)
+                // mode = 0 means `(reg1)`, i.e. no displacement unless base is rbp/r13.
+                return *this;
+
+            if (-128 <= m.a.add && m.a.add < 128) {
+                _code[ref] |= 0x40;  // mode = 1 -- 8-bit displacement.
+                return imm8((i8) m.a.add);
+            }
+
+            _code[ref] |= 0x80;  // mode = 2 -- 32-bit displacement
+            return imm32((i32) m.a.add);
+        }
         protected:
             std::vector<i8> _code;
             std::deque<target> _targets;
@@ -278,71 +394,6 @@ namespace as
                 if (i.tg != NULL) return i.tg;
                 _targets.emplace_back();
                 return i.tg = &_targets.back();
-            }
-
-            template <typename any>
-            code& rex(i8 w,        any b) { return rex(w, r0, b); }
-            code& rex(i8 w, reg r, ptr b) { return rex(w, r.H(), b.a.reg.H(), b.b.reg.H()); }
-            code& rex(i8 w, ptr r, reg b) { return rex(w, b.H(), r.a.reg.H(), r.b.reg.H()); }
-            code& rex(i8 w, reg r, reg b) { return rex(w, r.H(),       b.H(),           0); }
-            code& rex(i8 w,  i8 r,  i8 b, i8 x)
-            {
-                //     /--- opcode is 64-bit
-                //     |   /--- additional significant bit for modr/m reg2 field
-                //     |   |   /-- same for index register
-                //     |   |   |   /--- same for reg1 (see below)
-                return w + r + x + b ? imm8(0x40 | w << 3 | r << 2 | x << 1 | b) : *this;
-            }
-
-            template <typename any>
-            code& modrm(reg a, any b) { return modrm(a.L(), b); }
-            code& modrm(ptr a, reg b) { return modrm(b.L(), a); }
-            code& modrm( i8 a, reg r) { return imm8(0xc0 | a << 3 | r.L()); }
-            code& modrm( i8 a, ptr m) {
-                size_t ref = _code.size();
-                // _code[ref] is the ModR/M byte:
-                //    0 1 2 3 4 5 6 7
-                //    | | |   | \---/----- register 1
-                //    | | \---/----- opcode extension (only for single-register opcodes) or register 2
-                //    \-/----- mode (0, 1, or 2; 3 means "raw value from register" and is encoded above)
-                imm8(a << 3 | m.a.reg.L());
-
-                if (m.a.reg == rip)
-                    // mode = 0 with reg1 = rbp/rip/r13 (0b101) means `disp32(%rip)`
-                    // it's not possible to use rip-relative addressing in any other way.
-                    return imm32((i32) m.a.add);
-
-                if (m.a.reg == r0 || m.a.reg.L() == rsp.L() || m.b.reg != r0) {
-                    // rsp's encoding (100) in reg1 means "use SIB byte".
-                    _code[ref] = (_code[ref] & ~7) | r0.L();
-                    // SIB byte:
-                    //    0 1 2 3 4 5 6 7
-                    //    | | |   | \---/--- base register
-                    //    | | \---/--- index register; %rsp if none
-                    //    \-/--- index scale: result = base + index * (2 ** scale) + disp
-                    i8 scale = m.b.mul == 2 ? 1
-                             : m.b.mul == 4 ? 2
-                             : m.b.mul == 8 ? 3 : 0;
-                    i8 sib = m.b.reg.L() << 3 | scale << 6;
-
-                    if (m.a.reg == r0)
-                        // %rbp as base in mode 0 means no base at all, only 32-bit absolute address
-                        return imm8(sib | rbp.L()).imm32((i32) m.a.add);
-
-                    imm8(sib | m.a.reg.L());
-                }
-
-                if (m.a.add == 0 && m.a.reg != rbp && m.a.reg != r13)
-                    // mode = 0 means `(reg1)`, i.e. no displacement unless base is rbp/r13.
-                    return *this;
-
-                if (-128 <= m.a.add && m.a.add < 128) {
-                    _code[ref] |= 0x40;  // mode = 1 -- 8-bit displacement.
-                    return imm8((i8) m.a.add);
-                }
-
-                _code[ref] |= 0x80;  // mode = 2 -- 32-bit displacement
-                return imm32((i32) m.a.add);
             }
     };
 };

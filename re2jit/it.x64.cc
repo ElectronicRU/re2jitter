@@ -1,17 +1,127 @@
 #include <sys/mman.h>
-
+#include "re2/prog.h"
+#include "util/sparse_set.h"
 #include "asm64.h"
 
-
-struct re2jit::native
+namespace re2jit {
+static constexpr const as::r64 CLIST = as::rsi, NLIST = as::rdi, LISTSKIP = as::r14,
+                 SBEGIN = as::r8, SEND = as::r9, SCURRENT = as::r10, SMATCH = as::r11,
+                 LISTBEGIN = as::r12, LISTEND = as::r13, VIS = as::rbp;
+static constexpr const as::rb CHAR = as::bl;
+static constexpr const as::r32 FLAGS = as::edx;
+struct native
 {
-    void * _code;
-    size_t _size;
+    void * code_;
+    size_t size_;
+    re2::Prog *prog_;
+    int number_of_states_;
 
-    native(re2::Prog *) : _code(NULL), _size(0)
+    as::label REGEX_BEGIN;
+    as::label REGEX_FINISH;
+
+    // Emits CNEXT, a series of instruction that transistion to the next state.
+    // It's not as easy as it sounds; since we unfortunately cannot possibly hope
+    // to fit in 32-bit address space, we must use whopping TWO registers here.
+    void emit_nextstate(as::code &code) {
+        code.lodsl()
+            // wrap the list pointer around
+            .cmp(CLIST, LISTEND)
+            .mov(LISTBEGIN, CLIST, as::equal)
+            // YIKES
+            // lea takes up 
+            .mov(REGEX_BEGIN, as::rcx)
+            .add(as::rcx, as::rax)
+            .jmp(as::rax);
+    }
+
+    // store the entry with the label on NLIST
+    // This is more or less the opposite of CNEXT?..
+    void store_state(as::code &code, as::label &lab) {
+        // movl <label offset>, %eax
+        code.rex(0, as::eax).imm8(0xb8 | as::eax.L()).off32(lab)
+            .stosl()
+            .cmp(NLIST, LISTEND)
+            .mov(LISTBEGIN, NLIST, as::equal);
+    }
+
+    void enqueue_for_state(as::code &, int);
+
+    // Emits CLAST, a special code place that terminates the state list.
+    // We in total need 3 different versions: the one that does add states, and the one that doesn't
+    // (labeled kind = 0, 1)
+    // the general case is not in the beginning of the string, because we handle that separately
+    void emit_laststate(as::code &code,
+            int state0,
+            as::label &start_match) {
+        as::label clast, cend;
+        code.mark(clast)
+            .cmp(SEND, SCURRENT).jmp(REGEX_FINISH, as::equal);  // if the end of the string, end it
+        // if we have a match, no point searching for a new one
+        code.test(RE2JIT_ANCHOR_START, FLAGS).jmp(cend, as::not_zero);
+        code.test(SMATCH, SMATCH).jmp(cend, as::not_zero);
+        code.mark(start_match);
+        enqueue_for_state(code, state0);
+        code.mark(cend)
+            // if the list is empty, move out
+            .cmp(CLIST, NLIST).jmp(REGEX_FINISH, as::equal)
+            .mov(NLIST, LISTSKIP);
+        // clear visited
+        code.mov(VIS, as::rdi)
+            .mov(0, as::al)
+            .mov((number_of_states_ + 7) / 8, as::ecx)
+            .repz().stosb()
+            .mov(LISTSKIP, as::rdi);  // yes we are hypocrites, this code knows that NLIST is rdi
+            store_state(code, clast); // add ourselves to the end of the next list
+        // get next character
+        code.mov(as::mem(SCURRENT), CHAR)
+            .inc(SCURRENT);
+        emit_nextstate(code);
+    }
+
+    struct StackedState {
+        int id;
+    };
+
+    struct StackedState *state_stack_;
+    re2::SparseSet state_set_;
+    as::label *state_labels_;
+
+
+    void encode_state(as::code &code, int state_id) {
+        re2::Prog::Inst *ip = prog_->inst(state_id);
+        as::label cnext;
+        switch (ip->opcode()) {
+        default:
+            return;
+
+        case re2::kInstByteRange:
+            code.mark(state_labels_[state_id]);
+            if (ip->lo() == ip->hi()) {
+                code.cmp(ip->lo(), CHAR)
+                    .jmp(cnext, as::not_equal);
+            } else if (ip->lo() == 0x00 and ip->hi() == 0xff) {
+                // accept
+            } else {
+                code.mov(CHAR, as::al)
+                    .sub(ip->lo(), as::al)
+                    .cmp(ip->hi() - ip->lo(), as::al)
+                    .jmp(cnext, as::above);
+            }
+            enqueue_for_state(code, ip->out());
+            code.mark(cnext);
+            emit_nextstate(code);
+            break;
+        }
+    }
+
+    native(re2::Prog *prog) : code_(NULL), size_(0), prog_(prog)
     {
+        number_of_states_ = prog->size();
+        state_stack_ = new StackedState[number_of_states_];
+        state_set_.resize(number_of_states_);
+        state_labels_ = new as::label[number_of_states_];
+
         as::code code;
-        as::label loop, end, fail;
 
         // System V ABI:
         //   * первые 6 аргументов - rdi, rsi, rdx, rcx, r8, r9
@@ -22,29 +132,56 @@ struct re2jit::native
         //     сгенерированного кода это тоже касается. если испортить значение
         //     в регистре, поведение после ret будет непредсказуемым.
 
-        // memset(&stack[-length], 'x', length);
-        code.mov (as::rsi, as::rdx)
-            .sub (as::rsi, as::rsp)
-            .push(as::rsi)
-            .push(as::rdi)
-            .mov (as::rsp + 16, as::rdi)
-            .push(as::rdi)
-            .mov (as::i32('x'), as::esi)
-            .call(&memset)
-        // if (memcmp(rdi = input, rsi = &stack[-length], rcx = length) != 0) goto fail;
-            .pop (as::rsi)
-            .pop (as::rdi)
-            .pop (as::rcx)
-            .repz().cmpsb()
-            .mov (as::rsi + as::rcx, as::rsp)
-            .jmp (fail, as::not_equal)
-        // return 1;
-            .mov (as::i8(1), as::eax)
-            .ret ()
-        // fail: return 0;
-            .mark(fail)
-            .xor_(as::eax, as::eax)
-            .ret ();
+        // Prologue. It's just handcrafted mostly.
+        code.mark(REGEX_BEGIN)
+            .push(as::r64(CHAR.id))
+            .push(SMATCH)
+            .push(LISTBEGIN)
+            .push(LISTEND)
+            .push(LISTSKIP)
+            .push(VIS);
+
+        code.mov(as::rcx, LISTBEGIN)
+            .mov(as::ptr(as::rcx + 2 * 4 * (number_of_states_+ 1)), LISTEND)
+
+            .mov(as::r8, VIS)
+
+            .mov(as::rdi, SBEGIN)
+            .mov(as::rdi, SCURRENT)
+            .mov(as::ptr(as::rdi + as::rsi), SEND)
+            .xor_(SMATCH, SMATCH)
+
+            .mov(LISTBEGIN + 4, CLIST)
+            .mov(CLIST, NLIST);
+
+        // this code could theoretically be more optimized by nearly doubling its size,
+        // but currently I find it hard to give half a shit about it.
+        as::label start_match;
+        code.cmp(SCURRENT, SEND).jmp(REGEX_FINISH, as::equal).jmp8(start_match);
+        emit_laststate(code, prog_->start(), start_match);
+
+        for (int i = 0; i < prog->size(); ++i) {
+            encode_state(code, i);
+        }
+
+        as::label move_out;
+        code.mark(REGEX_FINISH)
+            .test(RE2JIT_ANCHOR_END, FLAGS)
+            .jmp8(move_out, as::zero)
+            .cmp(SEND, SMATCH)
+            .jmp8(move_out, as::equal)
+            .xor_(SMATCH, SMATCH)
+            .mark(move_out);
+
+        code.mov(SMATCH, as::rax)
+            .pop(VIS)
+            .pop(LISTSKIP)
+            .pop(LISTEND)
+            .pop(LISTBEGIN)
+            .pop(SMATCH)
+            .pop(as::r64(CHAR.id))
+            .ret();
+
 
         size_t sz = code.size();
         void * tg = mmap(NULL, sz, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
@@ -66,20 +203,85 @@ struct re2jit::native
             throw std::runtime_error("can't change permissions");
         }
 
-        _code = tg;
-        _size = sz;
+        code_ = tg;
+        size_ = sz;
     }
 
-   ~native()
+    ~native()
     {
-        munmap(_code, _size);
+        munmap(code_, size_);
     }
 
-    bool match(const re2::StringPiece &text, int /* flags */,
-                     re2::StringPiece * /* groups */, int /* ngroups */)
+    bool match(const re2::StringPiece &text, int flags,
+            re2::StringPiece *groups, int ngroups)
     {
-        typedef int f(const char*, size_t);
-        // см. it.vm.cc -- там описание StringPiece, Prog, flags и groups.
-        return ((f *) _code)(text.data(), text.size());
+        typedef char *f(const char*, size_t, int, void *, void *);
+        as::s32 *list = new as::s32[(number_of_states_ + 1) * 2];
+        as::i8 *visited = new as::i8[(number_of_states_ + 7) / 8];
+        if (flags & RE2JIT_ANCHOR_END)
+            flags |= RE2JIT_MATCH_RIGHTMOST;
+        char *result = ((f *) code_)(text.data(), text.size(), flags, list, visited);
+        delete[] list;
+        delete[] visited;
+        if (result) {
+            if (ngroups)
+                groups[0].set(text.data(), result - text.data());
+            return 1;
+        }
+        return 0;
     }
+};
+void native::enqueue_for_state(as::code &code, int statenum) {
+    int nstk = 0;
+    state_stack_[nstk++].id = statenum;
+    state_set_.clear();
+    as::label end_of_the_line;
+    while (nstk > 0) {
+        const StackedState &ss = state_stack_[--nstk];
+        if (state_set_.contains(ss.id))
+            continue;
+        state_set_.insert_new(ss.id);
+        re2::Prog::Inst *ip = prog_->inst(ss.id);
+        as::label skip_this;
+        as::s32 div8;
+        as::i8 mod8;
+        switch (ip->opcode()) {
+        default:
+            throw std::runtime_error("cannot handle that yet");
+
+        case re2::kInstFail:
+            break;
+
+        case re2::kInstMatch:
+            // Any match we found can be considered always better.
+            code.mov(SCURRENT, SMATCH)
+                // if it is NOT the longest match, terminate all current threads
+                // and don't add any future ones
+                .test(RE2JIT_MATCH_RIGHTMOST, FLAGS)
+                .mov(LISTSKIP, CLIST, as::zero)
+                .jmp(end_of_the_line, as::zero);
+            break;
+
+        case re2::kInstAltMatch:  // treat them the same for now
+        case re2::kInstAlt:
+            state_stack_[nstk++].id = ip->out1();
+            state_stack_[nstk++].id = ip->out();
+            break;
+
+        case re2::kInstByteRange:
+            // state worth recording
+            div8 = ss.id / 8;
+            mod8 = 1 << (ss.id % 8);
+            // test the relevant bit in the VIS
+            code.test(mod8, as::mem(VIS + div8))
+                .jmp8(skip_this, as::not_zero)
+                .or_(mod8, as::mem(VIS + div8));
+            store_state(code, state_labels_[ss.id]);
+            code.mark(skip_this);
+            break;
+        }
+    }
+    code.mark(end_of_the_line);
+}
+
 };
