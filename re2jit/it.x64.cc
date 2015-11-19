@@ -20,26 +20,19 @@ struct native
     as::label REGEX_FINISH;
 
     // Emits CNEXT, a series of instruction that transistion to the next state.
-    // It's not as easy as it sounds; since we unfortunately cannot possibly hope
-    // to fit in 32-bit address space, we must use whopping TWO registers here.
     void emit_nextstate(as::code &code) {
-        code.lodsl()
+        code.lodsq()
             // wrap the list pointer around
             .cmp(CLIST, LISTEND)
             .mov(LISTBEGIN, CLIST, as::equal)
-            // YIKES
-            // lea takes up 
-            .mov(REGEX_BEGIN, as::rcx)
-            .add(as::rcx, as::rax)
             .jmp(as::rax);
     }
 
     // store the entry with the label on NLIST
     // This is more or less the opposite of CNEXT?..
     void store_state(as::code &code, as::label &lab) {
-        // movl <label offset>, %eax
-        code.rex(0, as::eax).imm8(0xb8 | as::eax.L()).off32(lab)
-            .stosl()
+        code.mov(lab, as::rax)
+            .stosq()
             .cmp(NLIST, LISTEND)
             .mov(LISTBEGIN, NLIST, as::equal);
     }
@@ -106,7 +99,7 @@ struct native
                 code.mov(CHAR, as::al)
                     .sub(ip->lo(), as::al)
                     .cmp(ip->hi() - ip->lo(), as::al)
-                    .jmp(cnext, as::above);
+                    .jmp(cnext, as::more_u);
             }
             enqueue_for_state(code, ip->out());
             code.mark(cnext);
@@ -217,7 +210,7 @@ struct native
             re2::StringPiece *groups, int ngroups)
     {
         typedef char *f(const char*, size_t, int, void *, void *);
-        as::s32 *list = new as::s32[(number_of_states_ + 1) * 2];
+        as::i64 *list = new as::i64[(number_of_states_ + 1) * 2];
         as::i8 *visited = new as::i8[(number_of_states_ + 7) / 8];
         if (flags & RE2JIT_ANCHOR_END)
             flags |= RE2JIT_MATCH_RIGHTMOST;

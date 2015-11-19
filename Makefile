@@ -1,5 +1,5 @@
 CXX      ?= g++
-CXXFLAGS ?= -O3 -Wall -Wextra
+CXXFLAGS ?= -O3 -Wall -Wextra -Werror
 LIBTOOL ?= libtool
 
 ENABLE_VM         ?= 0
@@ -38,7 +38,8 @@ _require_test_run =     \
 	test/13-exponential \
 	test/20-submatching \
 	test/30-long        \
-	test/31-unicode
+	test/31-unicode     \
+	test/32-markdownish
 
 
 ARCHIVE = $(LIBTOOL) --mode=link $(CXX) $(CXXFLAGS) -o
@@ -48,7 +49,7 @@ CCFLAGS = ./ccflags
 DYNLINK = $(LIBTOOL) --mode=link $(CXX) $(CXXFLAGS) -shared -o
 INCLUDEOPTS = -I. -I./libjit/include -I./re2
 COMPILE = $(LIBTOOL) --mode=compile $(CXX) $(CXXFLAGS) $(_options) -std=c++11 $(INCLUDEOPTS)
-CMPTEST = $(LIBTOOL) --mode=link $(CXX) $(CXXFLAGS) $(_testopt) -std=c++11 $(INCLUDEOPTS) -pthread
+CMPTEST = $(LIBTOOL) --mode=link $(CXX) $(CXXFLAGS) $(_testopt) -std=c++11 $(INCLUDEOPTS) -pthread -Wno-format-security
 
 
 .PHONY: all clean test test/%

@@ -16,11 +16,13 @@ namespace as
     typedef uint64_t i64;
     typedef  int8_t  s8;
     typedef  int32_t s32;
+    template <typename T> static s32 p32(const T* p) { return s32(i64(p)); }
 
     enum condition : i8
     {
-        overflow, not_overflow, below, not_below, equal, not_equal, not_above, above, sign, not_sign,
-        parity_even, parity_odd, less,   more_equal,   zero = equal, not_zero = not_equal, less_equal,   more
+        overflow = 0, not_overflow = 1, negative = 8, not_negative = 9, even = 10, odd  = 11,
+        less_u = 2, more_equal_u = 3, equal = 4, not_equal = 5, less_equal_u = 6, more_u = 7,
+        less  = 12, more_equal  = 13, zero  = 4, not_zero  = 5, less_equal  = 14, more  = 15
     };
 
     struct reg
@@ -64,7 +66,7 @@ namespace as
         pre static inline auto operator op(a, b) -> decltype(x) { return x; }; \
         pre static inline auto operator op(b, a) -> decltype(x) { return x; }
     _commutative(template <typename T>, +, r64 a, T   b, ptr::base(a, b))
-    _commutative(template <typename T>, +, r64 a, T  *b, ptr::base(a, s32(i64(b))))
+    _commutative(template <typename T>, +, r64 a, T  *b, ptr::base(a, p32(b)))
     _commutative(template <typename T>, *, r64 a, T   b, ptr::index(a, b))
     _operator   (template <typename T>, -, r64 a, T   b, ptr::base(a, -b))
     _operator   (                     , +, r64 a, r64 b, ptr(a, b))
@@ -83,15 +85,15 @@ namespace as
 
     struct target { size_t offset = -1;
                     std::vector<size_t> rel8;
-                    std::vector<size_t> rel32;
                     std::vector<size_t> off32;
-                    void *deref(void *base) const { return (i8 *) base + offset; } };
+                    std::vector<size_t> offsets; };
 
     // linker needs to keep track of all existing targets, so outside code can only
     // operate with `target *`s (the actual targets are stored in a vector below).
     // unlike `typedef target* label`, this thin wrapper ensures that uninitialized
     // labels are set to NULL.
     struct label { target* tg = NULL;
+             const void  * operator()(const void *b) const { return tg ? (i8 *) b + tg->offset : NULL; }
              const target* operator->() const { return tg; } };
 
     // A simple x86-64 assembler and linker.
@@ -113,9 +115,8 @@ namespace as
                     return false;
 
                 s32 rel;
-                i64 off = tg.offset;
-
-                for (size_t ref : tg.rel32)
+                i32 off = tg.offset;
+                for (size_t ref : tg.offsets)
                     memcpy(&out[ref], &(rel = tg.offset - ref - 4), 4);
 
                 for (size_t ref : tg.off32)
@@ -136,11 +137,10 @@ namespace as
         code& imm8  (i8  i) { append(&i, 1); return *this; }
         code& imm32 (i32 i) { append(&i, 4); return *this; }
         code& imm64 (i64 i) { append(&i, 8); return *this; }
-
-        code& mark  (lab i) { init_label(i)->offset = size(); return *this; }
-        code& rel32 (lab i) { init_label(i)->rel32.push_back(size()); return imm32(0); }
         code& rel8  (lab i) { init_label(i)->rel8 .push_back(size()); return imm8 (0); }
+        code& rel32 (lab i) { init_label(i)->offsets.push_back(size()); return imm32(0); }
         code& off32 (lab i) { init_label(i)->off32.push_back(size()); return imm32(0); }
+        code& mark  (lab i) { init_label(i)->offset = size(); return *this; }
 
         //           src    dst             REX prefix   opcode     ModR/M      immediate
         //                  /cond           [64-bit mode]           [+ disp]
@@ -201,21 +201,22 @@ namespace as
         code& mov   (i8  a, rb  b) { return rex(0,    b).imm8(0xb0 | b.L()).    imm8 (a) ; }
         code& mov   (i32 a, r32 b) { return rex(0,    b).imm8(0xb8 | b.L()).    imm32(a) ; }
         code& mov   (i32 a, r64 b) { return rex(1,    b).imm8(0xc7).modrm(0, b).imm32(a) ; }
-        code& mov   (i64 a, r64 b) { return rex(1,    b).imm8(0xb8 | b.L()).    imm64(a) ; }
+        code& mov   (i64 a, r64 b) { return // if upper dword is 0, no need to waste space.
+                                  a >> 32 ? rex(1,    b).imm8(0xb8 | b.L()).    imm64(a)
+                                          : rex(0,    b).imm8(0xb8 | b.L()).    imm32(a) ; }
         code& mov   (r32 a, r32 b) { return rex(0, a, b).imm8(0x89).modrm(a, b)          ; }
         code& mov   (r64 a, r64 b) { return rex(1, a, b).imm8(0x89).modrm(a, b)          ; }
         code& mov   (i32 a, mem b) { return rex(1,    b).imm8(0xc7).modrm(0, b).imm32(a) ; }
         code& mov   (r32 a, mem b) { return rex(0, a, b).imm8(0x89).modrm(a, b)          ; }
         code& mov   (r64 a, mem b) { return rex(1, a, b).imm8(0x89).modrm(a, b)          ; }
-        // NOTE: MOV ptr, reg is actually LEA mem, reg
-        code& mov   (ptr a, r32 b) { return rex(0, a, b).imm8(0x8d).modrm(a, b)          ; }
-        code& mov   (ptr a, r64 b) { return rex(1, a, b).imm8(0x8d).modrm(a, b)          ; }
-        code& mov   (lab l, r64 b) {        rex(1,    b).imm8(0x8d).modrm(ptr(rip), b)   ;
-                                     return init_label(l)->rel32.push_back(size()-4), *this; }
                                      
         code& mov   (mem a,  rb b) { return rex(0, a, b).imm8(0x8a).modrm(a, b)          ; }
         code& mov   (mem a, r32 b) { return rex(0, a, b).imm8(0x8b).modrm(a, b)          ; }
         code& mov   (mem a, r64 b) { return rex(1, a, b).imm8(0x8b).modrm(a, b)          ; }
+        code& mov   (ptr a, r32 b) { return rex(0, a, b).imm8(0x8d).modrm(a, b) /* lea */; }
+        code& mov   (ptr a, r64 b) { return rex(1, a, b).imm8(0x8d).modrm(a, b) /* lea */; }
+        code& mov   (lab a, r64 b) { return rex(1,    b).imm8(0x8d).imm8(b.L() << 3 | rip.L())
+                                                          /* lea a(%rip), b */ .rel32(a) ; }
         code& neg   (       r32 b) { return rex(0,    b).imm8(0xf7).modrm(3, b)          ; }
         code& neg   (       r64 b) { return rex(1,    b).imm8(0xf7).modrm(3, b)          ; }
         code& negl  (       mem b) { return rex(0,    b).imm8(0xf7).modrm(3, b)          ; }
@@ -265,6 +266,7 @@ namespace as
         code& test  (r64 a, r64 b) { return rex(1, a, b).imm8(0x85).modrm(a, b)          ; }
         code& test  ( i8 a, mem b) { return rex(0,    b).imm8(0xf6).modrm(0, b).imm8 (a) ; }
         code& test  (i32 a, mem b) { return rex(0,    b).imm8(0xf7).modrm(0, b).imm32(a) ; }
+        code& ud2   (            ) { return   imm8(0x0f).imm8(0x0b)                      ; }
         code& xor_  ( i8 a,  rb b) { return rex(0,    b).imm8(0x80).modrm(6, b).imm8 (a) ; }
         code& xor_  ( i8 a, r32 b) { return rex(0,    b).imm8(0x83).modrm(6, b).imm8 (a) ; }
         code& xor_  ( i8 a, r64 b) { return rex(1,    b).imm8(0x83).modrm(6, b).imm8 (a) ; }
@@ -301,15 +303,16 @@ namespace as
         code& lodsb () { return            imm8(0xac); }
         code& lodsl () { return            imm8(0xad); }
         code& lodsq () { return rex(1, r0).imm8(0xad); }
-
-        // NOTE: CMOVcc: ModR/M reg1/reg2 fields are swapped compared to normal MOV.
+        // NOTE: CMOVcc and MOVZX: ModR/M reg1/reg2 fields are swapped compared to normal MOV.
         //       mov    %eax, %ecx  ->       0x89 [0xc1] (= 0b11 000 001)
         //       cmovbe %eax, %ecx  ->  0x0f 0x46 [0xc8] (= 0b11 001 000)
         // This is because mov is either r -> r/m or m -> r while cmovcc is r/m -> r.
-        code& mov(r32 a, r32 b, cnd c) { return rex(0, b, a).imm8(0x0f).imm8(0x40 | c).modrm(b, a); }
-        code& mov(r64 a, r64 b, cnd c) { return rex(1, b, a).imm8(0x0f).imm8(0x40 | c).modrm(b, a); }
-        code& mov(mem a, r32 b, cnd c) { return rex(0, b, a).imm8(0x0f).imm8(0x40 | c).modrm(b, a); }
-        code& mov(mem a, r64 b, cnd c) { return rex(1, b, a).imm8(0x0f).imm8(0x40 | c).modrm(b, a); }
+        code& mov   (r32 a, r32 b, cnd c) { return rex(0, b, a).imm8(0x0f).imm8(0x40 | c).modrm(b, a); }
+        code& mov   (r64 a, r64 b, cnd c) { return rex(1, b, a).imm8(0x0f).imm8(0x40 | c).modrm(b, a); }
+        code& mov   (mem a, r32 b, cnd c) { return rex(0, b, a).imm8(0x0f).imm8(0x40 | c).modrm(b, a); }
+        code& mov   (mem a, r64 b, cnd c) { return rex(1, b, a).imm8(0x0f).imm8(0x40 | c).modrm(b, a); }
+        code& movzb ( rb a, r32 b       ) { return rex(0, b, a).imm8(0x0f).imm8(0xb6).    modrm(b, a); }
+        code& movzb (mem a, r32 b       ) { return rex(0, b, a).imm8(0x0f).imm8(0xb6).    modrm(b, a); }
 
         // shorthands for indirect jumps to 64-bit (ok, 48-bit) pointers.
         template <typename T> code& mov   (T* p, r64 b) { return mov(i64(p), b); }
