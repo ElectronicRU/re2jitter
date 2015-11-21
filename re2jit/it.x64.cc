@@ -37,7 +37,7 @@ struct native
             .mov(LISTBEGIN, NLIST, as::equal);
     }
 
-    void enqueue_for_state(as::code &, int);
+    void enqueue_for_state(as::code &, int, bool threadkill = true);
 
     // Emits CLAST, a special code place that terminates the state list.
     // We in total need 3 different versions: the one that does add states, and the one that doesn't
@@ -52,7 +52,7 @@ struct native
         code.test(RE2JIT_ANCHOR_START, FLAGS).jmp(cend, as::not_zero);
         code.test(SMATCH, SMATCH).jmp(cend, as::not_zero);
         code.mark(start_match);
-        enqueue_for_state(code, state0);
+        enqueue_for_state(code, state0, false);
         // now that we've found all possible and impossible matches, we can bail out
         code.mark(cend)
             .cmp(SEND, SCURRENT).jmp(REGEX_FINISH, as::equal)  // if the end of the string, end it
@@ -143,13 +143,14 @@ struct native
             .mov(as::rsi, SEND)
             .xor_(SMATCH, SMATCH)
 
-            .mov(LISTBEGIN + 8, CLIST)
-            .mov(CLIST, NLIST);
+            .mov(as::rcx, CLIST)
+            .mov(as::rcx, NLIST);
+
 
         // this code could theoretically be more optimized by nearly doubling its size,
         // but currently I find it hard to give half a shit about it.
         as::label start_match;
-        code.jmp8(start_match);
+        code.jmp(start_match);
         emit_laststate(code, prog_->start(), start_match);
 
         for (int i = 0; i < prog->size(); ++i) {
@@ -159,9 +160,9 @@ struct native
         as::label move_out;
         code.mark(REGEX_FINISH)
             .test(RE2JIT_ANCHOR_END, FLAGS)
-            .jmp8(move_out, as::zero)
+            .jmp(move_out, as::zero)
             .cmp(SEND, SMATCH)
-            .jmp8(move_out, as::equal)
+            .jmp(move_out, as::equal)
             .xor_(SMATCH, SMATCH)
             .mark(move_out);
 
@@ -222,7 +223,7 @@ struct native
         return 0;
     }
 };
-void native::enqueue_for_state(as::code &code, int statenum) {
+void native::enqueue_for_state(as::code &code, int statenum, bool threadkill) {
     int nstk = 0;
     state_stack_[nstk++].id = statenum;
     state_set_.clear();
@@ -248,9 +249,10 @@ void native::enqueue_for_state(as::code &code, int statenum) {
             code.mov(SCURRENT, SMATCH)
                 // if it is NOT the longest match, terminate all current threads
                 // and don't add any future ones
-                .test(RE2JIT_MATCH_RIGHTMOST, FLAGS)
-                .mov(LISTSKIP, CLIST, as::zero)
-                .jmp(end_of_the_line, as::zero);
+                .test(RE2JIT_MATCH_RIGHTMOST, FLAGS);
+            if (threadkill)
+                code.mov(LISTSKIP, CLIST, as::zero);
+            code.jmp(end_of_the_line, as::zero);
             break;
 
         case re2::kInstAltMatch:  // treat them the same for now
@@ -271,7 +273,7 @@ void native::enqueue_for_state(as::code &code, int statenum) {
             mod8 = 1 << (ss.id % 8);
             // test the relevant bit in the VIS
             code.test(mod8, as::mem(VIS + div8))
-                .jmp8(skip_this, as::not_zero)
+                .jmp(skip_this, as::not_zero)
                 .or_(mod8, as::mem(VIS + div8));
             store_state(code, state_labels_[ss.id]);
             code.mark(skip_this);

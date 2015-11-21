@@ -49,7 +49,7 @@ namespace re2jit
         if (_forward->anchor_end() || anchor == RE2::ANCHOR_BOTH)
             flags |= RE2JIT_ANCHOR_END;
 
-        if (false && !(flags & RE2JIT_ANCHOR_START)) {
+        if (!(flags & RE2JIT_ANCHOR_START)) {
             re2::StringPiece found;
             bool failed  = false;
             bool matched = _forward->SearchDFA(text, text, re2::Prog::kUnanchored,
