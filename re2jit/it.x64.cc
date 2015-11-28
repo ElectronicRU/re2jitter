@@ -2,6 +2,7 @@
 #include "re2/prog.h"
 #include "util/sparse_set.h"
 #include "asm64.h"
+#include <cstdio>
 
 namespace re2jit {
 static constexpr const as::r64 CLIST = as::rsi, NLIST = as::rdi, LISTSKIP = as::r14,
@@ -9,6 +10,7 @@ static constexpr const as::r64 CLIST = as::rsi, NLIST = as::rdi, LISTSKIP = as::
                  LISTBEGIN = as::r12, LISTEND = as::r13, VIS = as::rbp;
 static constexpr const as::rb CHAR = as::bl;
 static constexpr const as::r32 FLAGS = as::edx;
+
 struct native
 {
     void * code_;
@@ -210,6 +212,7 @@ struct native
         typedef char *f(const char*, const char*, int, void *, void *);
         as::i64 *list = new as::i64[(number_of_states_ + 1) * 2];
         as::i8 *visited = new as::i8[(number_of_states_ + 7) / 8];
+	memset(visited, 0, (number_of_states_ + 7) / 8);
         if (flags & RE2JIT_ANCHOR_END)
             flags |= RE2JIT_MATCH_RIGHTMOST;
         char *result = ((f *) code_)(text.data(), text.data() + text.size(), flags, list, visited);
