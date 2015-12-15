@@ -4,6 +4,9 @@
 #include "asm64.h"
 #include <cstdio>
 
+#define printf(...) {}
+#define putchar(...) {}
+
 namespace re2jit {
 static constexpr const as::r64 CLIST = as::rsi, NLIST = as::rdi, LISTSKIP = as::r14,
                  SEND = as::r8, SCURRENT = as::r9, SMATCH = as::r10,
@@ -16,7 +19,6 @@ struct native
     void * code_;
     size_t size_;
     re2::Prog *prog_;
-    int number_of_states_;
 
     as::label REGEX_BEGIN;
     as::label REGEX_FINISH;
@@ -64,7 +66,7 @@ struct native
         // clear visited
         code.mov(VIS, as::rdi)
             .mov(0, as::al)
-            .mov((number_of_states_ + 7) / 8, as::ecx)
+            .mov((bit_array_size_ + 7) / 8, as::ecx)
             .repz().stosb()
             .mov(LISTSKIP, as::rdi);  // yes we are hypocrites, this code knows that NLIST is rdi
             store_state(code, clast); // add ourselves to the end of the next list
@@ -82,15 +84,16 @@ struct native
     re2::SparseSet state_set_;
     as::label *state_labels_;
 
-
     void encode_state(as::code &code, int state_id) {
         re2::Prog::Inst *ip = prog_->inst(state_id);
         as::label cnext;
         switch (ip->opcode()) {
         default:
+            putchar('\n');
             return;
 
         case re2::kInstByteRange:
+            printf("byte range %d[%d %d] %d\n", state_id, ip->lo(), ip->hi(), (int)ip->foldcase());
             code.mark(state_labels_[state_id]);
             if (ip->lo() == ip->hi()) {
                 code.cmp(ip->lo(), CHAR)
@@ -110,12 +113,62 @@ struct native
         }
     }
 
+    struct StateInfo {
+        int inpower;
+        int bit_array_index;
+    };
+
+    struct StateInfo *state_info_;
+
+    void state_info_dfs(int statenum) {
+        if (state_info_[statenum].inpower++)
+            return;
+        re2::Prog::Inst *ip = prog_->inst(statenum);
+        switch (ip->opcode()) {
+            case re2::kInstMatch:
+            case re2::kInstFail:
+                break;
+
+            case re2::kInstAlt:
+            case re2::kInstAltMatch:
+                state_info_dfs(ip->out());
+                state_info_dfs(ip->out1());
+                break;
+
+            default:
+                state_info_dfs(ip->out());
+        }
+    }
+
+    int bit_array_size_;
+    int number_of_states_;
+
+    void init_state_info() {
+        state_info_ = new StateInfo[prog_->size()];
+        memset(state_info_, 0, prog_->size() * sizeof(StateInfo));
+        state_info_dfs(prog_->start());
+        number_of_states_ = 0;
+        bit_array_size_ = 0;
+        for (int i = 0; i < prog_->size(); ++i) {
+            if (state_info_[i].inpower > 0) {
+                ++number_of_states_;
+                if (state_info_[i].inpower > 1) {
+                    state_info_[i].bit_array_index = bit_array_size_++;
+                }
+            }
+        }
+    }
+
+
+
+
     native(re2::Prog *prog) : code_(NULL), size_(0), prog_(prog)
     {
-        number_of_states_ = prog->size();
-        state_stack_ = new StackedState[number_of_states_];
-        state_set_.resize(number_of_states_);
-        state_labels_ = new as::label[number_of_states_];
+        state_stack_ = new StackedState[prog_->size()];
+        state_set_.resize(prog_->size());
+        state_labels_ = new as::label[prog_->size()]();
+
+        init_state_info();
 
         as::code code;
 
@@ -156,7 +209,9 @@ struct native
         emit_laststate(code, prog_->start(), start_match);
 
         for (int i = 0; i < prog->size(); ++i) {
-            encode_state(code, i);
+            if (state_info_[i].inpower > 0) {
+                encode_state(code, i);
+            }
         }
 
         as::label move_out;
@@ -204,6 +259,9 @@ struct native
     ~native()
     {
         munmap(code_, size_);
+        delete[] state_stack_;
+        delete[] state_labels_;
+        delete[] state_info_;
     }
 
     bool match(const re2::StringPiece &text, int flags,
@@ -211,8 +269,8 @@ struct native
     {
         typedef char *f(const char*, const char*, int, void *, void *);
         as::i64 *list = new as::i64[(number_of_states_ + 1) * 2];
-        as::i8 *visited = new as::i8[(number_of_states_ + 7) / 8];
-	memset(visited, 0, (number_of_states_ + 7) / 8);
+        as::i8 *visited = new as::i8[(bit_array_size_ + 7) / 8];
+        memset(visited, 0, (bit_array_size_ + 7) / 8);
         if (flags & RE2JIT_ANCHOR_END)
             flags |= RE2JIT_MATCH_RIGHTMOST;
         char *result = ((f *) code_)(text.data(), text.data() + text.size(), flags, list, visited);
@@ -248,6 +306,7 @@ void native::enqueue_for_state(as::code &code, int statenum, bool threadkill) {
             break;
 
         case re2::kInstMatch:
+            printf("\t-> %d (match)\n", ss.id);
             // Any match we found can be considered always better.
             code.mov(SCURRENT, SMATCH)
                 // if it is NOT the longest match, terminate all current threads
@@ -271,13 +330,16 @@ void native::enqueue_for_state(as::code &code, int statenum, bool threadkill) {
             break;
 
         case re2::kInstByteRange:
+            printf("\t -> %d (byte range)\n", ss.id);
             // state worth recording
-            div8 = ss.id / 8;
-            mod8 = 1 << (ss.id % 8);
-            // test the relevant bit in the VIS
-            code.test(mod8, as::mem(VIS + div8))
-                .jmp(skip_this, as::not_zero)
-                .or_(mod8, as::mem(VIS + div8));
+            if (state_info_[ss.id].inpower > 1) {
+                div8 = state_info_[ss.id].bit_array_index / 8;
+                mod8 = 1 << (state_info_[ss.id].bit_array_index % 8);
+                // test the relevant bit in the VIS
+                code.test(mod8, as::mem(VIS + div8))
+                    .jmp(skip_this, as::not_zero)
+                    .or_(mod8, as::mem(VIS + div8));
+            }
             store_state(code, state_labels_[ss.id]);
             code.mark(skip_this);
             break;
