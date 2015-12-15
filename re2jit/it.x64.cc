@@ -63,13 +63,17 @@ struct native
             // if the list is empty, move out
             .cmp(CLIST, NLIST).jmp(REGEX_FINISH, as::equal)
             .mov(NLIST, LISTSKIP);
-        // clear visited
-        code.mov(VIS, as::rdi)
-            .mov(0, as::al)
-            .mov((bit_array_size_ + 7) / 8, as::ecx)
-            .repz().stosb()
-            .mov(LISTSKIP, as::rdi);  // yes we are hypocrites, this code knows that NLIST is rdi
-            store_state(code, clast); // add ourselves to the end of the next list
+        if (bit_array_size_ > 32) {
+            // clear visited
+            code.mov(VIS, as::rdi)
+                .mov(0, as::al)
+                .mov((bit_array_size_ + 7) / 8, as::ecx)
+                .repz().stosb()
+                .mov(LISTSKIP, as::rdi);  // yes we are hypocrites, this code knows that NLIST is rdi
+        } else {
+            code.xor_(VIS, VIS);
+        }
+        store_state(code, clast); // add ourselves to the end of the next list
         // get next character
         code.mov(as::mem(SCURRENT), CHAR)
             .inc(SCURRENT);
@@ -269,8 +273,13 @@ struct native
     {
         typedef char *f(const char*, const char*, int, void *, void *);
         as::i64 *list = new as::i64[(number_of_states_ + 1) * 2];
-        as::i8 *visited = new as::i8[(bit_array_size_ + 7) / 8];
-        memset(visited, 0, (bit_array_size_ + 7) / 8);
+        as::i8 *visited;
+        if (bit_array_size_ > 32) {
+            visited = new as::i8[(bit_array_size_ + 7) / 8];
+            memset(visited, 0, (bit_array_size_ + 7) / 8);
+        } else {
+            visited = nullptr;
+        }
         if (flags & RE2JIT_ANCHOR_END)
             flags |= RE2JIT_MATCH_RIGHTMOST;
         char *result = ((f *) code_)(text.data(), text.data() + text.size(), flags, list, visited);
@@ -298,6 +307,7 @@ void native::enqueue_for_state(as::code &code, int statenum, bool threadkill) {
         as::label skip_this;
         as::s32 div8;
         as::i8 mod8;
+        as::i32 mask;
         switch (ip->opcode()) {
         default:
             throw std::runtime_error("cannot handle that yet");
@@ -333,12 +343,19 @@ void native::enqueue_for_state(as::code &code, int statenum, bool threadkill) {
             printf("\t -> %d (byte range)\n", ss.id);
             // state worth recording
             if (state_info_[ss.id].inpower > 1) {
-                div8 = state_info_[ss.id].bit_array_index / 8;
-                mod8 = 1 << (state_info_[ss.id].bit_array_index % 8);
-                // test the relevant bit in the VIS
-                code.test(mod8, as::mem(VIS + div8))
-                    .jmp(skip_this, as::not_zero)
-                    .or_(mod8, as::mem(VIS + div8));
+                if (bit_array_size_ > 32) {
+                    div8 = state_info_[ss.id].bit_array_index / 8;
+                    mod8 = 1 << (state_info_[ss.id].bit_array_index % 8);
+                    // test the relevant bit in the VIS
+                    code.test(mod8, as::mem(VIS + div8))
+                        .jmp(skip_this, as::not_zero)
+                        .or_(mod8, as::mem(VIS + div8));
+                } else {
+                    mask = 1 << state_info_[ss.id].bit_array_index;
+                    code.test(mask, VIS)
+                        .jmp(skip_this, as::not_zero)
+                        .or_(mask, VIS);
+                }
             }
             store_state(code, state_labels_[ss.id]);
             code.mark(skip_this);
