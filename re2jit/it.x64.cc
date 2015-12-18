@@ -15,7 +15,7 @@ static constexpr const as::r64 CLIST = as::rsi, NLIST = as::rdi, LISTSKIP = as::
                  SEND = as::r8, SCURRENT = as::r9, SMATCH = as::r10,
                  LISTBEGIN = as::r12, LISTEND = as::r13, VIS = as::r11;
 static constexpr const as::rb CHAR = as::dl;
-static constexpr const as::r32 FLAGS = as::ebx;
+static constexpr const as::r32 FLAGS = as::ebx, VIS32 = as::r32(VIS.id);
 
 struct native
 {
@@ -74,7 +74,7 @@ struct native
                 .repz().stosb()
                 .mov(LISTSKIP, as::rdi);  // yes we are hypocrites, this code knows that NLIST is rdi
         } else {
-            code.xor_(as::r32(VIS.id), as::r32(VIS.id));
+            code.xor_(VIS32, VIS32);
         }
         store_state(code, clast); // add ourselves to the end of the next list
         // get next character
@@ -199,11 +199,14 @@ struct native
             .push(VIS);
 
         code.mov(as::rcx, LISTBEGIN)
-            .mov(as::ptr(as::rcx + 2 * 8 * (number_of_states_+ 1)), LISTEND)
+            .mov(as::ptr(as::rcx + 2 * 8 * (number_of_states_+ 1)), LISTEND);
 
-            .mov(LISTEND, VIS)
+        if (bit_array_size_ > 32)
+            code.mov(LISTEND, VIS);
+        else
+            code.xor_(VIS32, VIS32);
 
-            .mov(as::rdi, SCURRENT)
+        code.mov(as::rdi, SCURRENT)
             .mov(as::rsi, SEND)
             .xor_(SMATCH, SMATCH)
 
@@ -357,9 +360,9 @@ void native::enqueue_for_state(as::code &code, int statenum, bool threadkill) {
                         .or_(mod8, as::mem(VIS + div8));
                 } else {
                     mask = 1 << state_info_[ss.id].bit_array_index;
-                    code.test(mask, as::r32(VIS.id))
+                    code.test(mask, VIS32)
                         .jmp(skip_this, as::not_zero)
-                        .or_(mask, as::r32(VIS.id));
+                        .or_(mask, VIS32);
                 }
             }
             store_state(code, state_labels_[ss.id]);
