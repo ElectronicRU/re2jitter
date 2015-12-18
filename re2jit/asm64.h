@@ -176,6 +176,9 @@ namespace as
         code& cmp   (i32 a, r32 b) { return (b != eax) ?
                                             rex(0,    b).imm8(0x81).modrm(7, b).imm32(a) :
                                                          imm8(0x3d).            imm32(a) ; }
+        code& cmp   (i32 a, r64 b) { return (b != rax) ?
+                                            rex(1,    b).imm8(0x81).modrm(7, b).imm32(a) :
+                                            rex(1,   r0).imm8(0x3d).            imm32(a) ; }
         code& cmp   (r32 a, r32 b) { return rex(0, a, b).imm8(0x39).modrm(a, b)          ; }
         code& cmp   (r64 a, r64 b) { return rex(1, a, b).imm8(0x39).modrm(a, b)          ; }
         code& cmp   ( i8 a, mem b) { return rex(0,    b).imm8(0x80).modrm(7, b).imm8 (a) ; }
