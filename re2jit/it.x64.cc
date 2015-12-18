@@ -1,8 +1,11 @@
+extern "C" {
 #include <sys/mman.h>
+}
 #include "re2/prog.h"
 #include "util/sparse_set.h"
 #include "asm64.h"
 #include <cstdio>
+#include <cstdlib>
 
 #define printf(...) {}
 #define putchar(...) {}
@@ -71,7 +74,7 @@ struct native
                 .repz().stosb()
                 .mov(LISTSKIP, as::rdi);  // yes we are hypocrites, this code knows that NLIST is rdi
         } else {
-            code.xor_(VIS, VIS);
+            code.xor_(as::r32(VIS.id), as::r32(VIS.id));
         }
         store_state(code, clast); // add ourselves to the end of the next list
         // get next character
@@ -198,7 +201,7 @@ struct native
         code.mov(as::rcx, LISTBEGIN)
             .mov(as::ptr(as::rcx + 2 * 8 * (number_of_states_+ 1)), LISTEND)
 
-            .mov(as::r8, VIS)
+            .mov(LISTEND, VIS)
 
             .mov(as::rdi, SCURRENT)
             .mov(as::rsi, SEND)
@@ -276,20 +279,17 @@ struct native
     bool match(const re2::StringPiece &text, int flags,
             re2::StringPiece *groups, int ngroups)
     {
-        typedef char *f(const char*, const char*, int, void *, void *);
-        as::i64 *list = new as::i64[(number_of_states_ + 1) * 2];
-        as::i8 *visited;
+        typedef char *f(const char*, const char*, int, void *);
+        int listsize = (number_of_states_ + 1) * 2 * 8;
+        int memsize = listsize + ((bit_array_size_ > 32) ? ((bit_array_size_ + 7) / 8) : 0);
+        char *list_visited = (char *)malloc(memsize);
         if (bit_array_size_ > 32) {
-            visited = new as::i8[(bit_array_size_ + 7) / 8];
-            memset(visited, 0, (bit_array_size_ + 7) / 8);
-        } else {
-            visited = nullptr;
+            memset(list_visited + listsize, 0, (bit_array_size_ + 7) / 8);
         }
         if (flags & RE2JIT_ANCHOR_END)
             flags |= RE2JIT_MATCH_RIGHTMOST;
-        char *result = ((f *) code_)(text.data(), text.data() + text.size(), flags, list, visited);
-        delete[] list;
-        delete[] visited;
+        char *result = ((f *) code_)(text.data(), text.data() + text.size(), flags, list_visited);
+        free(list_visited);
         if (result) {
             if (ngroups)
                 groups[0].set(text.data(), result - text.data());
@@ -357,9 +357,9 @@ void native::enqueue_for_state(as::code &code, int statenum, bool threadkill) {
                         .or_(mod8, as::mem(VIS + div8));
                 } else {
                     mask = 1 << state_info_[ss.id].bit_array_index;
-                    code.test(mask, VIS)
+                    code.test(mask, as::r32(VIS.id))
                         .jmp(skip_this, as::not_zero)
-                        .or_(mask, VIS);
+                        .or_(mask, as::r32(VIS.id));
                 }
             }
             store_state(code, state_labels_[ss.id]);
