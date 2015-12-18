@@ -10,9 +10,9 @@
 namespace re2jit {
 static constexpr const as::r64 CLIST = as::rsi, NLIST = as::rdi, LISTSKIP = as::r14,
                  SEND = as::r8, SCURRENT = as::r9, SMATCH = as::r10,
-                 LISTBEGIN = as::r12, LISTEND = as::r13, VIS = as::rbp;
-static constexpr const as::rb CHAR = as::bl;
-static constexpr const as::r32 FLAGS = as::edx;
+                 LISTBEGIN = as::r12, LISTEND = as::r13, VIS = as::r11;
+static constexpr const as::rb CHAR = as::dl;
+static constexpr const as::r32 FLAGS = as::ebx;
 
 struct native
 {
@@ -187,6 +187,8 @@ struct native
 
         // Prologue. It's just handcrafted mostly.
         code.mark(REGEX_BEGIN)
+            .push(as::rbp)
+            .mov(as::rsp, as::rbp)
             .push(as::r64(CHAR.id))
             .push(LISTBEGIN)
             .push(LISTEND)
@@ -203,7 +205,9 @@ struct native
             .xor_(SMATCH, SMATCH)
 
             .mov(as::rcx, CLIST)
-            .mov(as::rcx, NLIST);
+            .mov(as::rcx, NLIST)
+
+            .mov(as::edx, FLAGS);
 
 
         // this code could theoretically be more optimized by nearly doubling its size,
@@ -233,6 +237,7 @@ struct native
             .pop(LISTEND)
             .pop(LISTBEGIN)
             .pop(as::r64(CHAR.id))
+            .pop(as::rbp)
             .ret();
 
 
