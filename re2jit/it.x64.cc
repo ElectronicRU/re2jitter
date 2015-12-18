@@ -351,6 +351,7 @@ struct native
 // However, we never actually copy anything to RESULT in this case, and we always properly clean up
 // the capture state even if it wouldn't matter otherwise.
 void native::enqueue_for_state(as::code &code, int statenum, as::label &cnext, bool init) {
+    code.push(as::rbp).mov(as::rsp, as::rbp);
     int nstk = 0;
     state_stack_[nstk++].id = statenum;
     state_set_.clear();
@@ -379,6 +380,7 @@ void native::enqueue_for_state(as::code &code, int statenum, as::label &cnext, b
         as::i8 mod8;
         as::i32 mask;
         as::i32 cap;
+        as::label dont_end;
         switch (ip->opcode()) {
         default:
             throw std::runtime_error("cannot handle that yet");
@@ -403,9 +405,12 @@ void native::enqueue_for_state(as::code &code, int statenum, as::label &cnext, b
             // if it is NOT the longest match, terminate all current threads
             // and don't add any future ones
             code.test(RE2JIT_MATCH_RIGHTMOST, FLAGS);
+            code.jmp(dont_end, as::not_zero);
             if (!init)
-                code.mov(LISTSKIP, CLIST, as::zero);
-            code.jmp(end_of_the_line, as::zero);
+                code.mov(LISTSKIP, CLIST);
+            // pop the balloon!
+            code.mov(as::rbp, as::rsp).pop(as::rbp);
+            code.jmp(end_of_the_line).mark(dont_end);
             break;
 
         case re2::kInstAltMatch:  // treat them the same for now
@@ -422,7 +427,8 @@ void native::enqueue_for_state(as::code &code, int statenum, as::label &cnext, b
             if (init || nstk > 0) {
                 // we have to clean up for the future
                 state_stack_[nstk++] = StackedState(0, cap);
-                code.push(as::mem(CLIST + cap));
+                if (!init)
+                    code.push(as::mem(CLIST + cap));
             }
             code.mov(SCURRENT, as::mem(CLIST + cap))
                 .mark(skip_cap);
@@ -460,7 +466,8 @@ void native::enqueue_for_state(as::code &code, int statenum, as::label &cnext, b
             break;
         }
     }
-    code.mark(cnext)
+    code.pop(as::rbp)
+        .mark(cnext)
         .add(GROUPSIZE, CLIST)
         .mark(end_of_the_line);
 }
