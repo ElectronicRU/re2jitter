@@ -66,7 +66,7 @@ struct native
             // if the list is empty, move out
             .cmp(CLIST, NLIST).jmp(REGEX_FINISH, as::equal)
             .mov(NLIST, LISTSKIP);
-        if (bit_array_size_ > 32) {
+        if (bit_memory_size_) {
             // clear visited
             code.mov(VIS, as::rdi)
                 .mov(0, as::al)
@@ -149,6 +149,7 @@ struct native
 
     int bit_array_size_;
     int number_of_states_;
+    int bit_memory_size_;
 
     void init_state_info() {
         state_info_ = new StateInfo[prog_->size()];
@@ -164,6 +165,10 @@ struct native
                 }
             }
         }
+        if (bit_array_size_ > 32)
+            bit_memory_size_ = (bit_array_size_ + 7) / 8;
+        else
+            bit_memory_size_ = 0;
     }
 
 
@@ -201,7 +206,7 @@ struct native
         code.mov(as::rcx, LISTBEGIN)
             .mov(as::ptr(as::rcx + 2 * 8 * (number_of_states_+ 1)), LISTEND);
 
-        if (bit_array_size_ > 32)
+        if (bit_memory_size_)
             code.mov(LISTEND, VIS);
         else
             code.xor_(VIS32, VIS32);
@@ -284,10 +289,10 @@ struct native
     {
         typedef char *f(const char*, const char*, int, void *);
         int listsize = (number_of_states_ + 1) * 2 * 8;
-        int memsize = listsize + ((bit_array_size_ > 32) ? ((bit_array_size_ + 7) / 8) : 0);
+        int memsize = listsize + bit_memory_size_;
         char *list_visited = (char *)malloc(memsize);
-        if (bit_array_size_ > 32) {
-            memset(list_visited + listsize, 0, (bit_array_size_ + 7) / 8);
+        if (bit_memory_size_) {
+            memset(list_visited + listsize, 0, bit_memory_size_);
         }
         if (flags & RE2JIT_ANCHOR_END)
             flags |= RE2JIT_MATCH_RIGHTMOST;
@@ -351,7 +356,7 @@ void native::enqueue_for_state(as::code &code, int statenum, bool threadkill) {
             printf("\t -> %d (byte range)\n", ss.id);
             // state worth recording
             if (state_info_[ss.id].inpower > 1) {
-                if (bit_array_size_ > 32) {
+                if (bit_memory_size_) {
                     div8 = state_info_[ss.id].bit_array_index / 8;
                     mod8 = 1 << (state_info_[ss.id].bit_array_index % 8);
                     // test the relevant bit in the VIS
