@@ -32,10 +32,13 @@ static constexpr const as::rb CHAR = as::dl;
 static constexpr const as::r32 FLAGS = as::ebx, VIS32 = as::r32(VIS.id);
 enum WORKFLAGS : as::i32 {
     MATCH_FOUND = 1 << 8,
+    WAS_WORD = 1 << 9,
     BEGIN_TEXT = re2::kEmptyBeginText << 16,
     END_TEXT = re2::kEmptyEndText << 16,
     BEGIN_LINE = re2::kEmptyBeginLine << 16,
     END_LINE = re2::kEmptyEndLine << 16,
+    WORD_BOUND = re2::kEmptyWordBoundary << 16,
+    NON_BOUND = re2::kEmptyNonWordBoundary << 16,
 };
 
 struct native
@@ -71,15 +74,31 @@ struct native
     // all other states -> first half of clast, but the first time around, we don't have second half of clast, so some work
     // has to be done twice.
     void emit_empty_test(as::code &code) {
-        as::label LT, LT2, LF;
-        code.cmp(SCURRENT, SEND).jmp(LT, as::equal)
-            .cmp(as::i8('\n'), as::mem(SCURRENT)).jmp(LT2, as::equal)
-            .jmp(LF)
-        .mark(LT)
-            .or_(END_TEXT, FLAGS)
-        .mark(LT2)
-            .or_(END_LINE, FLAGS)
-        .mark(LF);
+        as::label no_end_text, end_test, yes_word, no_word;
+        code.cmp(SCURRENT, SEND).jmp(no_end_text, as::not_equal)
+            .or_(END_TEXT | END_LINE, FLAGS).jmp(no_word);
+
+        as::label no_end_line;
+        code.mark(no_end_text)
+            .mov(as::mem(SCURRENT), as::al)
+            .cmp('\n', as::al).jmp(no_end_line, as::not_equal)
+            .or_(END_LINE, FLAGS).mark(no_end_line);
+
+        as::label l_wn, l_nw;
+        code.cmp('_', as::al).jmp(yes_word, as::equal)
+            .and_(as::i8(~32), as::al)
+            .sub('A', as::al).cmp('Z' - 'A', as::al).jmp(no_word, as::more_u);
+        // Here, the current character is a word
+        code.mark(yes_word)
+            .test(WAS_WORD, FLAGS).jmp(l_wn, as::zero)
+            .or_(NON_BOUND, FLAGS).jmp(end_test)
+            .mark(l_wn).or_(WORD_BOUND | WAS_WORD, FLAGS).jmp(end_test)
+            .mark(no_word)
+            .test(WAS_WORD, FLAGS).jmp(l_nw, as::not_zero)
+            .or_(NON_BOUND, FLAGS).jmp(end_test)
+            .mark(l_nw).or_(WORD_BOUND, FLAGS).and_(~WAS_WORD, FLAGS);
+
+        code.mark(end_test);
     }
 
     // Emits CLAST, a special code place that terminates the state list.
@@ -169,6 +188,12 @@ struct native
                     .mark(dont_skip);
             } else if (ip->lo() == 0x00 and ip->hi() == 0xff) {
                 // accept
+            } else if (ip->foldcase() && 'a' <= ip->lo() && ip->hi() <= 'z') {
+                code.mov(CHAR, as::al)
+                    .or_(as::i8(32), as::al)
+                    .sub(ip->lo(), as::al)
+                    .cmp(ip->hi() - ip->lo(), as::al)
+                    .jmp(cnext, as::more_u);
             } else {
                 if (ip->foldcase()) {
                     int lo = std::max(ip->lo(), (int)'a') - 'a' + 'A',
