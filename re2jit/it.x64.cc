@@ -7,6 +7,7 @@ extern "C" {
 #include <cstdio>
 #include <cstdlib>
 #include <deque>
+#include <algorithm>
 
 #define printf(...) {}
 #define putchar(...) {}
@@ -113,7 +114,7 @@ struct native
             // clear visited
             code.mov(VIS, as::rdi)
                 .mov(0, as::al)
-                .mov((bit_array_size_ + 7) / 8, as::ecx)
+                .mov(bit_memory_size_, as::ecx)
                 .repz().stosb()
                 .mov(LISTSKIP, as::rdi);  // yes we are hypocrites, this code knows that NLIST is rdi
         } else {
@@ -147,7 +148,7 @@ struct native
 
     void encode_state(as::code &code, int state_id) {
         re2::Prog::Inst *ip = prog_->inst(state_id);
-        as::label cnext;
+        as::label cnext, dont_skip;
         switch (ip->opcode()) {
         default:
             putchar('\n');
@@ -157,15 +158,35 @@ struct native
             printf("byte range %d[%d %d] %d\n", state_id, ip->lo(), ip->hi(), (int)ip->foldcase());
             code.mark(state_labels_[state_id]);
             if (ip->lo() == ip->hi()) {
+                if (ip->foldcase()) {
+                    if ('a' <= ip->lo() && ip->lo() <= 'z') {
+                        code.cmp(ip->lo() - 'a' + 'A', CHAR)
+                            .jmp(dont_skip, as::equal);
+                    }
+                }
                 code.cmp(ip->lo(), CHAR)
-                    .jmp(cnext, as::not_equal);
+                    .jmp(cnext, as::not_equal)
+                    .mark(dont_skip);
             } else if (ip->lo() == 0x00 and ip->hi() == 0xff) {
                 // accept
             } else {
+                if (ip->foldcase()) {
+                    int lo = std::max(ip->lo(), (int)'a') - 'a' + 'A',
+                        hi = std::min(ip->hi(), (int)'z') - 'z' + 'Z';
+                    if (lo == hi) {
+                        code.cmp(lo, CHAR).jmp(dont_skip, as::equal);
+                    } else if (lo < hi) {
+                        code.mov(CHAR, as::al)
+                            .sub(lo, as::al)
+                            .cmp(hi - lo, as::al)
+                            .jmp(dont_skip, as::less_equal_u);
+                    }
+                }
                 code.mov(CHAR, as::al)
                     .sub(ip->lo(), as::al)
                     .cmp(ip->hi() - ip->lo(), as::al)
-                    .jmp(cnext, as::more_u);
+                    .jmp(cnext, as::more_u)
+                    .mark(dont_skip);
             }
             enqueue_for_state(code, ip->out(), cnext);
             emit_nextstate(code);
@@ -471,7 +492,8 @@ void native::enqueue_for_state(as::code &code, int statenum, as::label &cnext, b
                 // we gonna write to RESULT, so use it to store current RDI value for us..
                 code.mov(NLIST, SPARE).mov(RESULT, NLIST)
                     .mov(GROUPSIZE, as::rcx)
-                    .repz().movsb()
+                    .shr(3, as::rcx)
+                    .repz().movsq()
                     .sub(GROUPSIZE, CLIST)
                     .mov(SPARE, NLIST);
             }
@@ -537,7 +559,8 @@ void native::enqueue_for_state(as::code &code, int statenum, as::label &cnext, b
             store_state(code, state_labels_[ss.id]);
             // copy the capture state
             code.mov(GROUPSIZE, as::rcx)
-                .repz().movsb()
+                .shr(3, as::rcx)
+                .repz().movsq()
                 .sub(GROUPSIZE, CLIST);
             code.mark(skip_this);
             break;
