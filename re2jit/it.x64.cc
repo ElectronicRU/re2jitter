@@ -6,6 +6,7 @@ extern "C" {
 #include "asm64.h"
 #include <cstdio>
 #include <cstdlib>
+#include <deque>
 
 #define printf(...) {}
 #define putchar(...) {}
@@ -30,8 +31,10 @@ static constexpr const as::rb CHAR = as::dl;
 static constexpr const as::r32 FLAGS = as::ebx, VIS32 = as::r32(VIS.id);
 enum WORKFLAGS : as::i32 {
     MATCH_FOUND = 1 << 8,
-    LINE_BEGIN =  1 << 9,
-    LINE_END = 1 << 10,
+    BEGIN_TEXT = re2::kEmptyBeginText << 16,
+    END_TEXT = re2::kEmptyEndText << 16,
+    BEGIN_LINE = re2::kEmptyBeginLine << 16,
+    END_LINE = re2::kEmptyEndLine << 16,
 };
 
 struct native
@@ -62,6 +65,21 @@ struct native
     }
 
     void enqueue_for_state(as::code &, int, as::label&, bool init = false);
+
+    // this is used twice because code is somewhat badly structured, I guess. Normally execution follows second half of clast ->
+    // all other states -> first half of clast, but the first time around, we don't have second half of clast, so some work
+    // has to be done twice.
+    void emit_empty_test(as::code &code) {
+        as::label LT, LT2, LF;
+        code.cmp(SCURRENT, SEND).jmp(LT, as::equal)
+            .cmp(as::i8('\n'), as::mem(SCURRENT)).jmp(LT2, as::equal)
+            .jmp(LF)
+        .mark(LT)
+            .or_(END_TEXT, FLAGS)
+        .mark(LT2)
+            .or_(END_LINE, FLAGS)
+        .mark(LF);
+    }
 
     // Emits CLAST, a special code place that terminates the state list.
     // We in total need 3 different versions: the one that does add states, and the one that doesn't
@@ -105,15 +123,22 @@ struct native
         code.add(GROUPSIZE, NLIST);  // reserve space for ourselves for space evennness
         // get next character
         code.mov(as::mem(SCURRENT), CHAR)
-            .inc(SCURRENT);
+            .inc(SCURRENT)
+            .and_(as::i32(0xffff), FLAGS);
+        {
+            as::label L;
+            code.cmp('\n', CHAR).jmp(L, as::not_equal).or_(BEGIN_LINE, FLAGS).mark(L);
+        }
+        emit_empty_test(code);
         emit_nextstate(code);
     }
 
     struct StackedState {
         int id;
         as::i32 saved_index;
-        StackedState() {}
-        StackedState(int id, as::i32 saved) : id(id), saved_index(saved) {}
+        as::label label;
+        StackedState() : id(0), saved_index(0), label() {}
+        StackedState(int id, as::i32 saved) : id(id), saved_index(saved), label() {}
     };
 
     struct StackedState *state_stack_;
@@ -155,26 +180,6 @@ struct native
 
     struct StateInfo *state_info_;
 
-    void state_info_dfs(int statenum) {
-        if (state_info_[statenum].inpower++)
-            return;
-        re2::Prog::Inst *ip = prog_->inst(statenum);
-        switch (ip->opcode()) {
-            case re2::kInstMatch:
-            case re2::kInstFail:
-                break;
-
-            case re2::kInstAlt:
-            case re2::kInstAltMatch:
-                state_info_dfs(ip->out());
-                state_info_dfs(ip->out1());
-                break;
-
-            default:
-                state_info_dfs(ip->out());
-        }
-    }
-
     int bit_array_size_;
     int number_of_states_;
     int bit_memory_size_;
@@ -182,7 +187,51 @@ struct native
     void init_state_info() {
         state_info_ = new StateInfo[prog_->size()];
         memset(state_info_, 0, prog_->size() * sizeof(StateInfo));
-        state_info_dfs(prog_->start());
+
+        std::deque<int> state_deque = { prog_->start() };
+
+        while (!state_deque.empty()) {
+            int id = state_deque.front();
+            state_deque.pop_front();
+            int nstk = 0;
+            state_stack_[nstk++].id = id;
+            state_set_.clear();
+            while (nstk > 0) {
+                StackedState &ss = state_stack_[--nstk];
+                if (state_set_.contains(ss.id))
+                    continue;
+                state_set_.insert_new(ss.id);
+                re2::Prog::Inst *ip = prog_->inst(ss.id);
+                switch (ip->opcode()) {
+                    default:
+                        throw std::runtime_error("cannot handle that yet");
+
+                    case re2::kInstEmptyWidth:
+                    case re2::kInstNop:
+                    case re2::kInstCapture:
+                        state_stack_[nstk++].id = ip->out();
+                        break;
+
+
+                    case re2::kInstFail:
+                    case re2::kInstMatch:
+                        break;
+
+                    case re2::kInstAltMatch:  // treat them the same for now
+                    case re2::kInstAlt:
+                        state_stack_[nstk++].id = ip->out1();
+                        state_stack_[nstk++].id = ip->out();
+                        break;
+
+                    case re2::kInstByteRange:
+                        if (!(state_info_[ss.id].inpower++)) {
+                            state_deque.push_back(ip->out());
+                        }
+                        break;
+                }
+            }
+        }
+
         number_of_states_ = 0;
         bit_array_size_ = 0;
         for (int i = 0; i < prog_->size(); ++i) {
@@ -204,8 +253,8 @@ struct native
 
     native(re2::Prog *prog) : code_(NULL), size_(0), prog_(prog)
     {
-        state_stack_ = new StackedState[prog_->size()];
-        state_set_.resize(prog_->size());
+        state_stack_ = new StackedState[prog_->size() * 2]; // at most one main stack state and one helper one
+        state_set_.resize(prog_->size()); 
         state_labels_ = new as::label[prog_->size()]();
 
         init_state_info();
@@ -252,6 +301,8 @@ struct native
         // this code could theoretically be more optimized by nearly doubling its size,
         // but currently I find it hard to give half a shit about it.
         as::label start_match;
+        code.or_(BEGIN_TEXT | BEGIN_LINE, FLAGS);
+        emit_empty_test(code);
         code.jmp(start_match);
         emit_laststate(code, prog_->start(), start_match);
 
@@ -260,17 +311,9 @@ struct native
                 encode_state(code, i);
             }
         }
-
-        as::label move_out;
+        
         code.mark(REGEX_FINISH)
-            .test(RE2JIT_ANCHOR_END, FLAGS)
-            .jmp(move_out, as::zero)
-            .cmp(SEND, as::mem(RESULT + 8))
-            .jmp(move_out, as::equal)
-            .xor_(FLAGS, FLAGS)
-            .mark(move_out);
-
-        code.mov(FLAGS, as::eax)
+            .mov(FLAGS, as::eax)
             .and_(MATCH_FOUND, as::eax)
             .pop(as::r15)
             .pop(as::r14)
@@ -317,7 +360,7 @@ struct native
     {
         typedef int f(const char*, const char*, int, void *, void *, int);
         int groupsize = (ngroups ?: 1) * 2 * 8;
-        int listsize = (number_of_states_ + 1) * 2 * (8 + groupsize);
+        int listsize = (number_of_states_ + 1) * 4 * (8 + groupsize);
         int memsize = listsize + groupsize + bit_memory_size_;
         char *list_groups_visited = (char *)malloc(memsize);
         memset(list_groups_visited, 0, memsize);
@@ -357,8 +400,8 @@ void native::enqueue_for_state(as::code &code, int statenum, as::label &cnext, b
     state_set_.clear();
     as::label end_of_the_line;
     while (nstk > 0) {
-        const StackedState &ss = state_stack_[--nstk];
-        if (ss.id == 0) {
+        StackedState &ss = state_stack_[--nstk];
+        if (ss.id == 0 && ss.saved_index) {
             // it's a phony that tells us to restore
             as::label skip_cap;
             code.cmp(ss.saved_index, GROUPSIZE)
@@ -370,6 +413,9 @@ void native::enqueue_for_state(as::code &code, int statenum, as::label &cnext, b
             }
             code.mark(skip_cap);
             continue;
+        } else if (ss.id == 0 && ss.saved_index == 0) {
+            code.mark(ss.label);
+            continue;
         }
         if (state_set_.contains(ss.id))
             continue;
@@ -380,37 +426,64 @@ void native::enqueue_for_state(as::code &code, int statenum, as::label &cnext, b
         as::i8 mod8;
         as::i32 mask;
         as::i32 cap;
-        as::label dont_end;
         switch (ip->opcode()) {
         default:
             throw std::runtime_error("cannot handle that yet");
+
+        case re2::kInstEmptyWidth:
+            state_stack_[nstk] = StackedState();
+            code.mov(FLAGS, as::eax).not_(as::eax)
+                .test(as::i32(ip->empty()) << 16, as::eax)
+                .jmp(state_stack_[nstk++].label, as::not_zero);
+            state_stack_[nstk++].id = ip->out();
+            break;
+
 
         case re2::kInstFail:
             break;
 
         case re2::kInstMatch:
             printf("\t-> %d (match)\n", ss.id);
-            // Any match we found can be considered always better... for now at least.
+            {
+                as::label L;
+                code.test(RE2JIT_ANCHOR_END, FLAGS).jmp(L, as::zero)
+                    .cmp(SCURRENT, SEND).jmp(skip_this, as::not_equal)
+                    .mark(L);
+            }
+            // if longest-mode, check if the new match is longer
+            {
+                as::label leftmost_best;
+                code.test(RE2JIT_MATCH_RIGHTMOST, FLAGS).jmp(leftmost_best, as::zero);
+                as::label or_true, and_false;
+                code.test(MATCH_FOUND, FLAGS).jmp(or_true, as::zero) // if match not found yet or
+                    .mov(as::mem(CLIST), as::rax).cmp(as::rax, as::mem(RESULT))
+                    .jmp(or_true, as::more_u) // capture[0] < match[0]
+                    .jmp(and_false, as::not_equal) // or (capture[0] == match[0] &&
+                    .mov(as::mem(CLIST + 8), as::rax).cmp(as::rax, as::mem(RESULT + 8))
+                    .jmp(or_true, as::less_u) // && capture[1] > match[1]
+                    .mark(and_false).jmp(skip_this)
+                    .mark(or_true).mark(leftmost_best);
+            }
+            // Here, the match is better either by definition, or because it is leftmost-longer
             code.mov(SCURRENT, as::mem(CLIST + 8))
                 .or_(MATCH_FOUND, FLAGS);
-            if (!init) {
+            if (!init) {  // doesnt make sense to copy RESULT to RESULT anyway
                 // we gonna write to RESULT, so use it to store current RDI value for us..
                 code.mov(NLIST, SPARE).mov(RESULT, NLIST)
                     .mov(GROUPSIZE, as::rcx)
                     .repz().movsb()
                     .sub(GROUPSIZE, CLIST)
                     .mov(SPARE, NLIST);
-            } // else CLIST is RESULT and we don't care to copy it
+            }
 
             // if it is NOT the longest match, terminate all current threads
             // and don't add any future ones
-            code.test(RE2JIT_MATCH_RIGHTMOST, FLAGS);
-            code.jmp(dont_end, as::not_zero);
+            code.test(RE2JIT_MATCH_RIGHTMOST, FLAGS).jmp(skip_this, as::not_zero);
             if (!init)
                 code.mov(LISTSKIP, CLIST);
             // pop the balloon!
             code.mov(as::rbp, as::rsp).pop(as::rbp);
-            code.jmp(end_of_the_line).mark(dont_end);
+            code.jmp(end_of_the_line).mark(skip_this);
             break;
 
         case re2::kInstAltMatch:  // treat them the same for now
@@ -442,6 +515,10 @@ void native::enqueue_for_state(as::code &code, int statenum, as::label &cnext, b
         case re2::kInstByteRange:
             printf("\t -> %d (byte range)\n", ss.id);
             // state worth recording
+            if (state_info_[ss.id].inpower == 0) {
+                fprintf(stderr, "state %d (inpower %d) reaching state %d\n", statenum, state_info_[statenum].inpower, ss.id);
+                throw std::runtime_error("state somehow not detected during walk");
+            }
             if (state_info_[ss.id].inpower > 1) {
                 if (bit_memory_size_) {
                     div8 = state_info_[ss.id].bit_array_index / 8;
