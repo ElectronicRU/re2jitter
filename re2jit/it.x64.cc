@@ -33,6 +33,7 @@ static constexpr const as::r32 FLAGS = as::ebx, VIS32 = as::r32(VIS.id);
 enum WORKFLAGS : as::i32 {
     MATCH_FOUND = 1 << 8,
     WAS_WORD = 1 << 9,
+    NOT_FIRST = 1 << 10,
     BEGIN_TEXT = re2::kEmptyBeginText << 16,
     END_TEXT = re2::kEmptyEndText << 16,
     BEGIN_LINE = re2::kEmptyBeginLine << 16,
@@ -108,13 +109,14 @@ struct native
     void emit_laststate(as::code &code,
             int state0,
             as::label &start_match) {
-        as::label clast, cend, dummy;
+        as::label clast, cend, dummy, do_add;
         code.mark(clast)
             .add(GROUPSIZE, CLIST);
         // if we have a match, no point searching for a new one
+        code.test(NOT_FIRST, FLAGS).jmp(do_add, as::zero);
         code.test(RE2JIT_ANCHOR_START, FLAGS).jmp(cend, as::not_zero);
         code.test(MATCH_FOUND, FLAGS).jmp(cend, as::not_zero);
-        code.mark(start_match);
+        code.mark(do_add).or_(NOT_FIRST, FLAGS);
         // use RESULT as our canvas here since it is empty anyway
         code.mov(CLIST, SPARE).mov(RESULT, CLIST).mov(SCURRENT, as::mem(RESULT));
         enqueue_for_state(code, state0, dummy, true);
@@ -127,21 +129,7 @@ struct native
         code.mark(cend)
             .cmp(SEND, SCURRENT).jmp(REGEX_FINISH, as::equal)  // if the end of the string, end it
             // if the list is empty, move out
-            .cmp(CLIST, NLIST).jmp(REGEX_FINISH, as::equal)
-            .mov(NLIST, LISTSKIP);
-        if (bit_memory_size_) {
-            // clear visited
-            code.mov(VIS, as::rdi)
-                .mov(0, as::al)
-                .mov(bit_memory_size_, as::ecx)
-                .repz().stosb()
-                .mov(LISTSKIP, as::rdi);  // yes we are hypocrites, this code knows that NLIST is rdi
-        } else {
-            code.xor_(VIS32, VIS32);
-        }
-        store_state(code, clast);  // add ourselves to the end of the next list
-        code.add(GROUPSIZE, NLIST);  // reserve space for ourselves for space evennness
-        // get next character
+            .cmp(CLIST, NLIST).jmp(REGEX_FINISH, as::equal);
         code.mov(as::mem(SCURRENT), CHAR)
             .inc(SCURRENT)
             .and_(as::i32(0xffff), FLAGS);
@@ -149,7 +137,22 @@ struct native
             as::label L;
             code.cmp('\n', CHAR).jmp(L, as::not_equal).or_(BEGIN_LINE, FLAGS).mark(L);
         }
+        code.mark(start_match);
         emit_empty_test(code);
+        code.mov(NLIST, LISTSKIP);
+        if (bit_memory_size_) {
+            // clear visited
+            code.mov(VIS, NLIST)
+                .mov(0, as::al)
+                .mov(bit_memory_size_, as::ecx)
+                .repz().stosb()
+                .mov(LISTSKIP, NLIST);
+        } else {
+            code.xor_(VIS32, VIS32);
+        }
+        store_state(code, clast);  // add ourselves to the end of the next list
+        code.add(GROUPSIZE, NLIST);  // reserve space for ourselves for space evennness
+        // get next character
         emit_nextstate(code);
     }
 
@@ -331,9 +334,7 @@ struct native
             .mov(as::r9, GROUPSIZE);
 
         if (bit_memory_size_)
-            code.mov(LISTEND, VIS).add(GROUPSIZE, VIS);
-        else
-            code.xor_(VIS32, VIS32);
+            code.mov(LISTEND + GROUPSIZE, VIS);
 
         code.mov(as::rdi, SCURRENT)
             .mov(as::rsi, SEND)
@@ -344,11 +345,8 @@ struct native
             .mov(as::edx, FLAGS);
 
 
-        // this code could theoretically be more optimized by nearly doubling its size,
-        // but currently I find it hard to give half a shit about it.
         as::label start_match;
         code.or_(BEGIN_TEXT | BEGIN_LINE, FLAGS);
-        emit_empty_test(code);
         code.jmp(start_match);
         emit_laststate(code, prog_->start(), start_match);
 
