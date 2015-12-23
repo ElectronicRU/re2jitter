@@ -122,13 +122,11 @@ struct native
             .repz().stosq()
             .sub(GROUPSIZE, NLIST)
             .xchg(CLIST, NLIST);
-        // use RESULT as our canvas here since it is empty anyway
         enqueue_for_state(code, state0, cend, true);
 
         code.cmp(SEND, SCURRENT).jmp(REGEX_FINISH, as::equal)  // if the end of the string, end it
-            // if the list is empty, move out
-            .cmp(CLIST, NLIST).jmp(REGEX_FINISH, as::equal);
-        code.mov(as::mem(SCURRENT), CHAR)
+            .cmp(CLIST, NLIST).jmp(REGEX_FINISH, as::equal)  // if the list is empty, move out
+            .mov(as::mem(SCURRENT), CHAR)
             .inc(SCURRENT)
             .and_(as::i32(0xffff), FLAGS);
         {
