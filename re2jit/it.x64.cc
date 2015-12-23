@@ -117,9 +117,10 @@ struct native
             .test(MATCH_FOUND, FLAGS).jmp(cend, as::not_zero)
             .mark(do_add).or_(NOT_FIRST, FLAGS);
         code.xchg(CLIST, NLIST)
-            .mov(0, as::eax).mov(GROUPSIZE, as::rcx).shr(3, as::rcx)
+            .mov(SCURRENT, as::rax).stosq()
+            .mov(0, as::eax).mov(GROUPSIZE, as::rcx).shr(3, as::rcx).dec(as::rcx)
             .repz().stosq()
-            .sub(GROUPSIZE, NLIST).mov(SCURRENT, as::mem(NLIST))
+            .sub(GROUPSIZE, NLIST)
             .xchg(CLIST, NLIST);
         // use RESULT as our canvas here since it is empty anyway
         enqueue_for_state(code, state0, cend, true);
