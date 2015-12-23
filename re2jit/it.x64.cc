@@ -116,6 +116,11 @@ struct native
             .test(RE2JIT_ANCHOR_START, FLAGS).jmp(cend, as::not_zero)
             .test(MATCH_FOUND, FLAGS).jmp(cend, as::not_zero)
             .mark(do_add).or_(NOT_FIRST, FLAGS);
+        code.xchg(CLIST, NLIST)
+            .mov(0, as::eax).mov(GROUPSIZE, as::rcx).shr(3, as::rcx)
+            .repz().stosq()
+            .sub(GROUPSIZE, NLIST).mov(SCURRENT, as::mem(NLIST))
+            .xchg(CLIST, NLIST);
         // use RESULT as our canvas here since it is empty anyway
         enqueue_for_state(code, state0, cend, true);
 
@@ -143,20 +148,7 @@ struct native
             code.xor_(VIS32, VIS32);
         }
         store_state(code, clast);  // add ourselves to the end of the next list
-        {
-            as::label dont, skip, end;
-
-            code.test(NOT_FIRST, FLAGS).jmp(dont, as::zero)
-                .test(RE2JIT_ANCHOR_START, FLAGS).jmp(skip, as::not_zero)
-                .test(MATCH_FOUND, FLAGS).jmp(skip, as::not_zero)
-                .mark(dont)
-                .mov(NLIST, SPARE)
-                .mov(0, as::eax).mov(GROUPSIZE, as::rcx).shr(3, as::rcx)
-                .repz().stosq().mov(SCURRENT, as::mem(SPARE))
-                .jmp(end)
-                .mark(skip).add(GROUPSIZE, NLIST)
-                .mark(end);
-        }
+        code.add(GROUPSIZE, NLIST);
         // get next character
         emit_nextstate(code);
     }
