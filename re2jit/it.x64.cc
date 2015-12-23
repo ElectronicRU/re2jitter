@@ -109,25 +109,17 @@ struct native
     void emit_laststate(as::code &code,
             int state0,
             as::label &start_match) {
-        as::label clast, cend, dummy, do_add;
+        as::label clast, cend, do_add;
         code.mark(clast)
-            .add(GROUPSIZE, CLIST);
         // if we have a match, no point searching for a new one
-        code.test(NOT_FIRST, FLAGS).jmp(do_add, as::zero);
-        code.test(RE2JIT_ANCHOR_START, FLAGS).jmp(cend, as::not_zero);
-        code.test(MATCH_FOUND, FLAGS).jmp(cend, as::not_zero);
-        code.mark(do_add).or_(NOT_FIRST, FLAGS);
+            .test(NOT_FIRST, FLAGS).jmp(do_add, as::zero)
+            .test(RE2JIT_ANCHOR_START, FLAGS).jmp(cend, as::not_zero)
+            .test(MATCH_FOUND, FLAGS).jmp(cend, as::not_zero)
+            .mark(do_add).or_(NOT_FIRST, FLAGS);
         // use RESULT as our canvas here since it is empty anyway
-        code.mov(CLIST, SPARE).mov(RESULT, CLIST).mov(SCURRENT, as::mem(RESULT));
-        enqueue_for_state(code, state0, dummy, true);
-        {
-            as::label dont_delete;
-            code.test(MATCH_FOUND, FLAGS).jmp(dont_delete, as::not_zero).mov(0, as::mem(RESULT)).mark(dont_delete);
-        }
-        code.mov(SPARE, CLIST);
-        // now that we've found all possible and impossible matches, we can bail out
-        code.mark(cend)
-            .cmp(SEND, SCURRENT).jmp(REGEX_FINISH, as::equal)  // if the end of the string, end it
+        enqueue_for_state(code, state0, cend, true);
+
+        code.cmp(SEND, SCURRENT).jmp(REGEX_FINISH, as::equal)  // if the end of the string, end it
             // if the list is empty, move out
             .cmp(CLIST, NLIST).jmp(REGEX_FINISH, as::equal);
         code.mov(as::mem(SCURRENT), CHAR)
@@ -151,7 +143,20 @@ struct native
             code.xor_(VIS32, VIS32);
         }
         store_state(code, clast);  // add ourselves to the end of the next list
-        code.add(GROUPSIZE, NLIST);  // reserve space for ourselves for space evennness
+        {
+            as::label dont, skip, end;
+
+            code.test(NOT_FIRST, FLAGS).jmp(dont, as::zero)
+                .test(RE2JIT_ANCHOR_START, FLAGS).jmp(skip, as::not_zero)
+                .test(MATCH_FOUND, FLAGS).jmp(skip, as::not_zero)
+                .mark(dont)
+                .mov(NLIST, SPARE)
+                .mov(0, as::eax).mov(GROUPSIZE, as::rcx).shr(3, as::rcx)
+                .repz().stosq().mov(SCURRENT, as::mem(SPARE))
+                .jmp(end)
+                .mark(skip).add(GROUPSIZE, NLIST)
+                .mark(end);
+        }
         // get next character
         emit_nextstate(code);
     }
@@ -431,12 +436,8 @@ struct native
 // Afterwards, RSI is wound forward by GROUPSIZE, and RDI is rewound by whatever number of states
 // got encoded.
 // If a match got encountered, RSI might be rewound to LISTEND.
-// if `init' is true, then RSI is never wound forward,
+// if `init' is true, then RSI is never rewound to LISTEND (although still wound forward),
 // and captures never store anything on stack (the current capture is assumed to be all zeros).
-// In that case RSI in fact points to RESULT, but we don't special-case it (the caller has to handle it)
-// since string operations are easier to do that way.
-// However, we never actually copy anything to RESULT in this case, and we always properly clean up
-// the capture state even if it wouldn't matter otherwise.
 void native::enqueue_for_state(as::code &code, int statenum, as::label &cnext, bool init) {
     code.push(as::rbp).mov(as::rsp, as::rbp);
     int nstk = 0;
@@ -510,16 +511,14 @@ void native::enqueue_for_state(as::code &code, int statenum, as::label &cnext, b
             }
             // Here, the match is better either by definition, or because it is leftmost-longer
             code.mov(SCURRENT, as::mem(CLIST + 8))
-                .or_(MATCH_FOUND, FLAGS);
-            if (!init) {  // doesnt make sense to copy RESULT to RESULT anyway
+                .or_(MATCH_FOUND, FLAGS)
                 // we gonna write to RESULT, so use it to store current RDI value for us..
-                code.mov(NLIST, SPARE).mov(RESULT, NLIST)
-                    .mov(GROUPSIZE, as::rcx)
-                    .shr(3, as::rcx)
-                    .repz().movsq()
-                    .sub(GROUPSIZE, CLIST)
-                    .mov(SPARE, NLIST);
-            }
+                .mov(NLIST, SPARE).mov(RESULT, NLIST)
+                .mov(GROUPSIZE, as::rcx)
+                .shr(3, as::rcx)
+                .repz().movsq()
+                .sub(GROUPSIZE, CLIST)
+                .mov(SPARE, NLIST);
 
             // if it is NOT the longest match, terminate all current threads
             // and don't add any future ones
@@ -542,7 +541,7 @@ void native::enqueue_for_state(as::code &code, int statenum, as::label &cnext, b
             // check if we actually want to capture it
             code.cmp(cap, GROUPSIZE)
                 .jmp(skip_cap, as::less_equal_u);
-            if (init || nstk > 0) {
+            if (nstk > 0) {
                 // we have to clean up for the future
                 state_stack_[nstk++] = StackedState(0, cap);
                 if (!init)
