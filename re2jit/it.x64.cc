@@ -106,7 +106,7 @@ struct native
     }
 
     void emit_bit_test(as::code &code, int id, as::label &skip_this) {
-        if (state_info_[id].inpower > 1) {
+        if (state_info_[id].inpower & -2) {
             as::i32 div32, mod32;
             if (bit_memory_size_) {
                 div32 = state_info_[id].bit_array_index / 32;
@@ -181,8 +181,8 @@ struct native
         int id;
         int saved_size;
         as::i32 saved_index;
-        StackedState() : id(0), saved_index(0), label() {}
-        StackedState(int id, as::i32 saved, int size) : id(id), saved_index(saved), label(), saved_size(size) {}
+        StackedState() {}
+        StackedState(int id, as::i32 saved, int size) : label(), id(id), saved_size(size), saved_index(saved) {}
     };
 
     struct StackedState *state_stack_;
@@ -282,7 +282,7 @@ struct native
                         break;
 
                     case re2::kInstMatch:
-                        state_info_[ss.id].inpower++;
+                        state_info_[ss.id].inpower--;
 
                     case re2::kInstFail:
                         break;
@@ -308,9 +308,9 @@ struct native
         for (int i = 0; i < prog_->size(); ++i) {
             if (state_info_[i].inpower > 0) {
                 ++number_of_states_;
-                if (state_info_[i].inpower > 1) {
-                    state_info_[i].bit_array_index = bit_array_size_++;
-                }
+            }
+            if (state_info_[i].inpower & -2) { //not 0 or 1
+                state_info_[i].bit_array_index = bit_array_size_++;
             }
         }
         if (bit_array_size_ > 32)
