@@ -139,9 +139,9 @@ struct native
         if (bit_memory_size_) {
             // clear visited
             code.mov(VIS, NLIST)
-                .mov(0, as::al)
+                .mov(0, as::eax)
                 .mov(bit_memory_size_, as::ecx)
-                .repz().stosb()
+                .repz().stosl()
                 .mov(LISTSKIP, NLIST);
         } else {
             code.xor_(VIS32, VIS32);
@@ -288,7 +288,7 @@ struct native
             }
         }
         if (bit_array_size_ > 32)
-            bit_memory_size_ = (bit_array_size_ + 7) / 8;
+            bit_memory_size_ = (bit_array_size_ + 31) / 32;
         else
             bit_memory_size_ = 0;
     }
@@ -398,10 +398,10 @@ struct native
     bool match(const re2::StringPiece &text, int flags,
             re2::StringPiece *groups, int ngroups)
     {
-        typedef int f(const char*, const char*, int, void *, void *, int);
+        typedef int f(const char*, const char*, int, void *, void *, long);
         int groupsize = (ngroups ?: 1) * 2 * 8;
-        int listsize = (number_of_states_ + 1) * 4 * (8 + groupsize);
-        int memsize = listsize + groupsize + bit_memory_size_;
+        int listsize = (number_of_states_ + 1) * 2 * (8 + groupsize);
+        int memsize = listsize + groupsize + bit_memory_size_ * 4;
         char *list_groups_visited = (char *)malloc(memsize);
         memset(list_groups_visited, 0, memsize);
         if (flags & RE2JIT_ANCHOR_END)
@@ -458,8 +458,8 @@ void native::enqueue_for_state(as::code &code, int statenum, as::label &cnext, b
         state_set_.insert_new(ss.id);
         re2::Prog::Inst *ip = prog_->inst(ss.id);
         as::label skip_this, skip_cap;
-        as::s32 div8;
-        as::i8 mod8;
+        as::i32 div32;
+        as::i32 mod32;
         as::i32 mask;
         as::i32 cap;
         switch (ip->opcode()) {
@@ -556,12 +556,12 @@ void native::enqueue_for_state(as::code &code, int statenum, as::label &cnext, b
             }
             if (state_info_[ss.id].inpower > 1) {
                 if (bit_memory_size_) {
-                    div8 = state_info_[ss.id].bit_array_index / 8;
-                    mod8 = 1 << (state_info_[ss.id].bit_array_index % 8);
+                    div32 = state_info_[ss.id].bit_array_index / 32;
+                    mod32 = 1 << (state_info_[ss.id].bit_array_index % 32);
                     // test the relevant bit in the VIS
-                    code.test(mod8, as::mem(VIS + div8))
+                    code.test(mod32, as::mem(VIS + div32 * 4))
                         .jmp(skip_this, as::not_zero)
-                        .or_(mod8, as::mem(VIS + div8));
+                        .or_(mod32, as::mem(VIS + div32 * 4));
                 } else {
                     mask = 1 << state_info_[ss.id].bit_array_index;
                     code.test(mask, VIS32)
