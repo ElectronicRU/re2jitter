@@ -139,12 +139,17 @@ struct native
             .test(RE2JIT_ANCHOR_START, FLAGS).jmp(cend, as::not_zero)
             .test(MATCH_FOUND, FLAGS).jmp(cend, as::not_zero)
             .mark(do_add).or_(NOT_FIRST, FLAGS);
-        code.xchg(CLIST, NLIST)
-            .mov(SCURRENT, as::rax).stosq()
-            .mov(0, as::eax).mov(GROUPSIZE, as::rcx).shr(3, as::rcx).dec(as::rcx)
-            .repz().stosq()
-            .sub(GROUPSIZE, NLIST)
-            .xchg(CLIST, NLIST);
+        if (max_group_ > 1) {
+            code.xchg(CLIST, NLIST)
+                .mov(SCURRENT, as::rax).stosq()
+                .mov(0, as::eax).mov(GROUPSIZE, as::rcx).shr(3, as::rcx).dec(as::rcx)
+                .repz().stosq()
+                .sub(GROUPSIZE, NLIST)
+                .xchg(CLIST, NLIST);
+        } else {
+            code.mov(SCURRENT, as::mem(CLIST))
+                .mov(0, as::mem(CLIST + 8));
+        }
         dprintf("INITIAL\n");
         enqueue_for_state(code, state0, cend, true);
 
@@ -252,10 +257,13 @@ struct native
     int bit_array_size_;
     int number_of_states_;
     int bit_memory_size_;
+    int max_group_;
 
     void init_state_info() {
         state_info_ = new StateInfo[prog_->size()];
         memset(state_info_, 0, prog_->size() * sizeof(StateInfo));
+
+        max_group_ = 1;
 
         std::deque<int> state_deque = { prog_->start() };
 
@@ -275,9 +283,11 @@ struct native
                     default:
                         throw std::runtime_error("cannot handle that yet");
 
+                    case re2::kInstCapture:
+                        if (max_group_ < ip->cap())
+                            max_group_ = ip->cap();
                     case re2::kInstEmptyWidth:
                     case re2::kInstNop:
-                    case re2::kInstCapture:
                         state_stack_[nstk++].id = ip->out();
                         break;
 
@@ -302,6 +312,8 @@ struct native
                 }
             }
         }
+
+        max_group_ = (max_group_ + 1) / 2;
 
         number_of_states_ = 0;
         bit_array_size_ = 0;
@@ -425,7 +437,10 @@ struct native
             re2::StringPiece *groups, int ngroups)
     {
         typedef int f(const char*, const char*, int, void *, void *, long);
-        int groupsize = (ngroups ?: 1) * 2 * 8;
+        int mgroups = (ngroups ?: 1);
+        if (mgroups > max_group_)
+            mgroups = max_group_;
+        int groupsize = mgroups * 2 * 8;
         int listsize = (number_of_states_ + 1) * 2 * (8 + groupsize);
         int memsize = listsize + groupsize + bit_memory_size_ * 4;
         char *list_groups_visited = (char *)malloc(memsize);
@@ -436,8 +451,11 @@ struct native
         if (result) {
             if (ngroups) {
                 char **pgroups = (char **)(list_groups_visited + listsize);
-                for (int i = 0; i < ngroups; ++i) {
+                for (int i = 0; i < mgroups; ++i) {
                     groups[i].set(pgroups[2 * i], pgroups[2 * i + 1] - pgroups[2 * i]);
+                }
+                for (int i = mgroups; i < ngroups; ++i) {
+                    groups[i].set((char*)nullptr, 0);
                 }
             }
         }
@@ -532,14 +550,21 @@ void native::enqueue_for_state(as::code &code, int statenum, as::label &cnext, b
             }
             // Here, the match is better either by definition, or because it is leftmost-longer
             code.mov(SCURRENT, as::mem(CLIST + 8))
-                .or_(MATCH_FOUND, FLAGS)
+                .or_(MATCH_FOUND, FLAGS);
                 // we gonna write to RESULT, so use it to store current RDI value for us..
-                .mov(NLIST, SPARE).mov(RESULT, NLIST)
-                .mov(GROUPSIZE, as::rcx)
-                .shr(3, as::rcx)
-                .repz().movsq()
-                .sub(GROUPSIZE, CLIST)
-                .mov(SPARE, NLIST);
+            if (max_group_ > 1) {
+                code.mov(NLIST, SPARE).mov(RESULT, NLIST)
+                    .mov(GROUPSIZE, as::rcx)
+                    .shr(3, as::rcx)
+                    .repz().movsq()
+                    .sub(GROUPSIZE, CLIST)
+                    .mov(SPARE, NLIST);
+            } else {
+                code.mov(as::mem(CLIST), as::rax)
+                    .mov(as::mem(CLIST + 8), SPARE)
+                    .mov(as::rax, as::mem(RESULT))
+                    .mov(SPARE, as::mem(RESULT + 8));
+            }
 
             // if it is NOT the longest match, terminate all current threads
             // and don't add any future ones
@@ -590,10 +615,18 @@ void native::enqueue_for_state(as::code &code, int statenum, as::label &cnext, b
             emit_bit_test(code, ss.id, skip_this);
             store_state(code, state_labels_[ss.id]);
             // copy the capture state
-            code.mov(GROUPSIZE, as::rcx)
-                .shr(3, as::rcx)
-                .repz().movsq()
-                .sub(GROUPSIZE, CLIST);
+            if (max_group_ > 1) {
+                code.mov(GROUPSIZE, as::rcx)
+                    .shr(3, as::rcx)
+                    .repz().movsq()
+                    .sub(GROUPSIZE, CLIST);
+            } else {
+                code.mov(as::mem(CLIST), as::rax)
+                    .mov(as::mem(CLIST + 8), SPARE)
+                    .mov(as::rax, as::mem(NLIST))
+                    .mov(SPARE, as::mem(NLIST + 8))
+                    .mov(NLIST + 16, NLIST);
+            }
             code.mark(skip_this);
             break;
         }
